@@ -69,6 +69,13 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
         for k, v in group_count(col).items():
             print(f"  {k:<28} {v:>9,}  {100.0 * v / n:5.1f}%")
     inbound_q = table.filter(pc.and_(pc.equal(table["CALL_TYPE"], "Inbound"), pc.is_valid(table["VQ_NAME"])))
+    print("\nVQ_NAME (inbound legs, share, abandon%, SL%):")
+    g = inbound_q.group_by("VQ_NAME").aggregate([("IRF_ID", "count"), ("ABANDON_FLAG", "sum"),
+                                                 ("SERVICE_LEVEL_FLAG", "mean")]).sort_by([("IRF_ID_count", "descending")])
+    for name, cnt, ab_sum, sl_mean in zip(g["VQ_NAME"].to_pylist(), g["IRF_ID_count"].to_pylist(),
+                                           g["ABANDON_FLAG_sum"].to_pylist(), g["SERVICE_LEVEL_FLAG_mean"].to_pylist()):
+        print(f"  {name:<28} {cnt:>9,}  {100.0 * cnt / max(1, inbound_q.num_rows):5.1f}%  "
+              f"ab={100.0 * (ab_sum or 0) / cnt:5.1f}%  sl={100.0 * (sl_mean or 0):5.1f}%")
     ab = pc.sum(inbound_q["ABANDON_FLAG"]).as_py() or 0
     sab = pc.sum(inbound_q["SHORT_ABANDON_FLAG"]).as_py() or 0
     sl = inbound_q.filter(pc.is_valid(inbound_q["SERVICE_LEVEL_FLAG"]))

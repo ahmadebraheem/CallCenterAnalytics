@@ -28,6 +28,14 @@ lulls:
   min_intensity: 0.0      # 0 = literally no calls during the lull
   max_intensity: 0.05
 
+# VQ volume shares are deliberately unbalanced (a few monster queues, a long tail of tiny ones).
+# Tweak individual shares here without re-declaring the whole `vqs` list; values are relative.
+vq_weights:
+  VQ_CustServ_General: 0.30
+  VQ_Sales_New: 0.22
+  VQ_Retention_VIP: 0.001
+  VQ_CustServ_Accessibility: 0.0005
+
 inbound:
   short_abandon_prob: 0.02
   rona_prob: 0.025

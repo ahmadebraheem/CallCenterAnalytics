@@ -143,10 +143,18 @@ even when late legs spill past midnight (their `ARRIVE_TIME` is on the next day)
 * **LOBs** – Sales, Retention, CustomerService, TechSupport, Billing, Collections. Each LOB has its
   own disposition codes, outcome mix (how often calls transfer / consult / conference ...) and
   transfer targets.
-* **VQs** – 14 virtual queues (e.g. `VQ_Sales_New`, `VQ_Retention_Cancel`, `VQ_Tech_Tier1` 24x7,
-  `VQ_Billing_Disputes` Mon-Fri, overflow queues ...). Each has an ACD queue DN, route point, DNIS,
-  skill, opening hours/days, talk-time distribution, hold probability, ACW, base ASA, customer
-  patience, service-level threshold and an optional overflow VQ.
+* **VQs** – 18 virtual queues with a deliberately **unbalanced** volume split, like a real centre:
+  three monster queues carry ~60 % of inbound traffic (`VQ_CustServ_General` 27 %, `VQ_Sales_New`
+  19 %, `VQ_Tech_Tier1` 15 %), five mid-size queues 3–10 % each (`VQ_Billing_Payments`,
+  `VQ_Retention_Cancel`, `VQ_Sales_Upgrade`, `VQ_CustServ_Account`, `VQ_Retention_Save_Offers`),
+  four small ones 0.8–2 % (`VQ_Tech_Tier2`, `VQ_Collections_Inbound`, `VQ_Billing_Disputes` Mon-Fri,
+  `VQ_Retention_Loyalty`) and a long tail of niche queues with a few dozen calls a day
+  (`VQ_Sales_Spanish`, `VQ_Tech_Enterprise`, `VQ_Retention_VIP`, `VQ_CustServ_Accessibility`,
+  the two overflow queues). Each VQ has an ACD queue DN, route point, DNIS, skill, opening
+  hours/days, talk-time distribution, hold probability, ACW, base ASA, customer patience,
+  service-level threshold and an optional overflow VQ. Because staffing is derived per queue, the
+  big queues absorb the bursts (and suffer the abandons) while the small, multi-skilled-covered
+  queues run at high service levels – change `vqs[].weight` to reshape the split.
 * **Agents** – the roster is *sized from the workload*: expected daily calls per VQ × AHT ÷
   occupancy ÷ shift length, spread across shift starts proportional to the forecast intraday
   volume, with two days off per agent (weekends more likely). Each agent has a site, team, tenure
@@ -249,6 +257,7 @@ checks listed (`--no-validate` skips this).
 | `customers` | pool size, repeat-caller skew, segment mix |
 | `output` | directory, compression, partitioning, dimensions, validation |
 | `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here |
+| `vq_weights` | shortcut `{VQ name: relative weight}` to reshape the volume split without re-declaring `vqs` |
 
 Examples:
 
@@ -264,6 +273,9 @@ day_events: {spike_day_prob: 0, quiet_day_prob: 0}
 
 # understaffed centre
 staffing: {roster_factor: 0.8}
+
+# make one queue even more dominant and starve a niche one
+vq_weights: {VQ_CustServ_General: 0.4, VQ_Retention_VIP: 0.0005}
 
 # one big file, no validation, gzip
 output: {partition_by_day: false, validate: false, compression: gzip}
@@ -282,9 +294,13 @@ generated, validated and written at a time; runtime is roughly 1.2 s per 30k-cal
 * burst / spike days: 80–140k interactions, peaks of 4–8k calls per minute, abandon 30–45 %,
   service level 20–40 %, thousands of callback requests
 * quiet days / weekends: 7–20k interactions
+* VQ split (inbound legs, typical week): `VQ_CustServ_General` 28 %, `VQ_Tech_Tier1` 16 %,
+  `VQ_Sales_New` 15 %, `VQ_Billing_Payments` 10 %, `VQ_Retention_Cancel` 8 % … down to
+  `VQ_Retention_VIP` 0.3 % and `VQ_CustServ_Accessibility` 0.1 % (≈35 calls/day)
 
 Run `python -m gim_synth summarize --out ./out` to see the distribution of results, resource
-roles, transfer types, LOBs and sites in your own output.
+roles, transfer types, LOBs, sites and the per-VQ volume / abandon / service-level table for your
+own output.
 
 ---
 

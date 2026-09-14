@@ -39,6 +39,19 @@ def test_config_roundtrip_and_validation():
         load_config(overrides={"vqs": [{"name": "VQ_X", "lob": "Nope", "skill": "s", "weight": 1}]})
     with pytest.raises(ValueError):
         load_config(overrides={"queue_model": {"not_a_key": 1}})
+    with pytest.raises(ValueError):
+        load_config(overrides={"vq_weights": {"VQ_Does_Not_Exist": 0.5}})
+    cfg = load_config(overrides={"vq_weights": {"VQ_Sales_New": 0.5}})
+    assert {v.name: v.weight for v in cfg.vqs}["VQ_Sales_New"] == 0.5
+
+
+def test_default_vq_split_is_skewed():
+    cfg = default_config()
+    weights = sorted((v.weight for v in cfg.vqs), reverse=True)
+    total = sum(weights)
+    assert weights[0] / total >= 0.25
+    assert sum(weights[:3]) / total >= 0.55
+    assert weights[-1] / total <= 0.005
 
 
 def test_outputs_written(small_run):
@@ -96,6 +109,19 @@ def test_volume_matches_config(small_run):
     per_day = [d["interactions"] for d in stats["days"]]
     for n in per_day:
         assert n >= cfg.calls_per_day * 0.6
+
+
+def test_vq_volumes_are_unbalanced(small_run):
+    cfg, stats, table, out = small_run
+    inbound = table.filter(pc.and_(pc.equal(table["CALL_TYPE"], "Inbound"), pc.is_valid(table["VQ_NAME"])))
+    g = inbound.group_by("VQ_NAME").aggregate([("IRF_ID", "count")])
+    counts = dict(zip(g["VQ_NAME"].to_pylist(), g["IRF_ID_count"].to_pylist()))
+    assert len(counts) == len(cfg.vqs), "every VQ should receive some traffic"
+    ordered = sorted(counts.values(), reverse=True)
+    total = sum(ordered)
+    assert ordered[0] / total > 0.2, "biggest VQ should dominate"
+    assert sum(ordered[:3]) / total > 0.5, "top-3 VQs should carry most of the volume"
+    assert ordered[0] > 25 * ordered[-1], "long tail VQs should be tiny compared with the biggest"
 
 
 def test_burst_and_lull_profile():

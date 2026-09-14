@@ -114,10 +114,28 @@ Staffing follows the forecast curve only, so every burst overloads the queues re
 expected wait grows exponentially with load, more customers run out of patience, callbacks are
 offered, overflow routing kicks in, and RONA/short-abandon rates stay at their base levels.
 
+## 8b. Queue-level variation (unbalanced VQs)
+
+Inbound arrivals are split across the VQs by `vqs[].weight`, which is intentionally very uneven:
+
+| Tier | VQs | Share of inbound |
+|---|---|---|
+| Monster | `VQ_CustServ_General` (24x7), `VQ_Sales_New`, `VQ_Tech_Tier1` (24x7) | 27 % / 19 % / 15 % |
+| Mid-size | `VQ_Billing_Payments`, `VQ_Retention_Cancel`, `VQ_Sales_Upgrade`, `VQ_CustServ_Account`, `VQ_Retention_Save_Offers` | 10 % / 9 % / 5 % / 4.5 % / 3 % |
+| Small | `VQ_Tech_Tier2`, `VQ_Collections_Inbound` (Mon-Sat), `VQ_Billing_Disputes` (Mon-Fri), `VQ_Retention_Loyalty` (Mon-Sat) | 2 % / 1.5 % / 1.2 % / 0.8 % |
+| Long tail | `VQ_Sales_Spanish`, `VQ_Tech_Enterprise` (Mon-Fri), `VQ_Retention_VIP`, `VQ_Overflow_Sales`, `VQ_CustServ_Accessibility` (Mon-Fri), `VQ_Overflow_Service` | 0.6 % … 0.2 % (30–180 calls/day) |
+
+Consequences you will see in the data: the monster queues take the brunt of bursts (abandon 10–13 %
+over a week with bursts, SL ~50–65 %), the mid-size queues sit in between, and the niche queues –
+covered by dedicated coverage agents plus multi-skilled agents from their LOB – run at high service
+levels with very few abandons. Closed queues still receive a trickle of after-hours calls
+(`after_hours_leak`) so every VQ appears every day. Overflow queues get almost no direct traffic;
+their volume comes from overflowed calls.
+
 ## 9. Agent-level variation
 
 * **Speed factor** per agent (log-normal σ 0.15) × tenure (`<3m` 1.18, `3-12m` 1.06, `1-3y` 0.98, `3y+` 0.92) scales talk and ACW.
-* **Shifts** – 8.5 h, start hours weighted by the VQ's expected hourly volume; night shifts mostly staffed by the offshore site; two days off per agent (weekend off 42 %, Mon-Fri VQs always off at weekends).
+* **Shifts** – 8.5 h, start hours weighted by the VQ's expected hourly volume; night shifts mostly staffed by the offshore site; two days off per agent (weekend off 42 %, Mon-Fri VQs always off at weekends). Every open hour of every VQ is guaranteed `min_agents_per_open_hour` eligible agents; the coverage agents added for thin queues work every open day.
 * **Skills** – primary VQ plus a secondary VQ in the same LOB (35 %), so multi-skilled agents appear across queues.
 
 ## 10. Customer-level variation

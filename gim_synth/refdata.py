@@ -314,9 +314,10 @@ def build_refdata(cfg: GeneratorConfig) -> RefData:
                 if not v.is_open(dow, hour):
                     continue
                 while len(eligible.get((v.idx, dow, hour), [])) < st.min_agents_per_open_hour:
+                    # coverage agents work every open day so a thin queue needs only a handful of them
                     a = make_agent(v, hour if hour + st.shift_len_h <= v.close_hour or v.is_24x7
                                    else max(v.open_hour, int(v.close_hour - st.shift_len_h)))
-                    a.days_off = {d for d in a.days_off if d != dow}
+                    a.days_off = set(range(7)) - v.open_days
                     eligible, on_shift = build_indexes()
 
     # ---------------- Customers ---------------- #

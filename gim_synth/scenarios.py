@@ -168,7 +168,7 @@ class LegBuilder:
         return self.r.uniform(2.0, 9.0) if self.r.random() < 0.85 else self.r.uniform(9.0, 20.0)
 
     def _talk(self, vq: VQ, agent: Agent, scale: float = 1.0) -> float:
-        return max(3.0, self._lognorm(vq.cfg.talk_median_s * agent.speed * scale, vq.cfg.talk_sigma))
+        return min(10800.0, max(3.0, self._lognorm(vq.cfg.talk_median_s * agent.speed * scale, vq.cfg.talk_sigma)))
 
     def _acw(self, vq: VQ, agent: Agent, scale: float = 1.0) -> float:
         if self.r.random() < 0.05:

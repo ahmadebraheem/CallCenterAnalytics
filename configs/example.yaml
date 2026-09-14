@@ -1,0 +1,56 @@
+# Example override file for `python -m gim_synth generate --config configs/example.yaml`
+# Only the keys you specify are overridden; everything else keeps the defaults shown by
+# `python -m gim_synth print-config`.  Lists (sites / lobs / vqs) are replaced wholesale.
+
+start_date: "2026-09-01"
+days: 30                  # any length works: 7, 31, 92, 365 ...
+calls_per_day: 30000      # baseline weekday arrivals before bursts
+seed: 2026
+timezone: "America/Chicago"
+
+weekday_factors: {Mon: 1.2, Tue: 1.1, Wed: 1.0, Thu: 1.0, Fri: 0.95, Sat: 0.5, Sun: 0.35}
+
+# "At one moment a billion calls come in, the next barely any"
+bursts:
+  rate_per_day: 1.5       # ordinary bursts per day (Poisson mean)
+  min_frac: 0.05          # each adds 5% .. 40% of the day's base volume ...
+  max_frac: 0.40
+  min_sigma_min: 2        # ... concentrated in a gaussian 2..20 min wide
+  max_sigma_min: 20
+  mega_prob: 0.08         # flash-crowd days: 0.5x..2x the daily volume inside ~4 minutes
+  mega_min_frac: 0.5
+  mega_max_frac: 2.0
+  mega_sigma_min: 4
+lulls:
+  rate_per_day: 1.5       # dead-phone windows per day
+  min_len_min: 10
+  max_len_min: 45
+  min_intensity: 0.0      # 0 = literally no calls during the lull
+  max_intensity: 0.05
+
+# VQ volume shares are deliberately unbalanced (a few monster queues, a long tail of tiny ones).
+# Tweak individual shares here without re-declaring the whole `vqs` list; values are relative.
+vq_weights:
+  VQ_CustServ_General: 0.30
+  VQ_Sales_New: 0.22
+  VQ_Retention_VIP: 0.001
+  VQ_CustServ_Accessibility: 0.0005
+
+# Predictive Behavioural Routing: PBR queues route disproportionately to high-scoring agents.
+# Any VQConfig field can be overridden per queue here.
+vq_overrides:
+  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5}
+  VQ_Retention_Cancel: {pbr_skew: 1.2}      # even more concentrated than the default 1.0
+
+inbound:
+  short_abandon_prob: 0.02
+  rona_prob: 0.025
+  callback_offer_wait_s: 180
+  callback_accept_prob: 0.4
+
+output:
+  directory: ./out_example
+  compression: zstd
+  partition_by_day: true
+  write_dimensions: true
+  validate: true

@@ -82,6 +82,27 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     print(f"\ninbound queued legs: {inbound_q.num_rows:,}  abandon%={100.0 * ab / max(1, inbound_q.num_rows):.2f}  "
           f"short-abandon%={100.0 * sab / max(1, inbound_q.num_rows):.2f}  "
           f"SL%={100.0 * (pc.sum(sl['SERVICE_LEVEL_FLAG']).as_py() or 0) / max(1, sl.num_rows):.2f}")
+    print("\nagent load balance by ROUTING_METHOD (answered inbound queue legs):")
+    for method in ("ACD", "PBR"):
+        sub = inbound_q.filter(pc.and_(pc.equal(inbound_q["ROUTING_METHOD"], method),
+                                       pc.equal(inbound_q["ANSWERED_FLAG"], 1)))
+        if sub.num_rows == 0:
+            continue
+        per_agent = sub.group_by("AGENT_ID").aggregate([("IRF_ID", "count")])["IRF_ID_count"].to_pylist()
+        per_agent.sort()
+        n_a = len(per_agent)
+        dec = max(1, n_a // 10)
+        top, bottom = sum(per_agent[-dec:]) / dec, sum(per_agent[:dec]) / dec
+        mean = sum(per_agent) / n_a
+        cum = 0
+        half = 0
+        for i, v in enumerate(per_agent):
+            cum += v
+            if half == 0 and cum >= sum(per_agent) / 2:
+                half = n_a - i
+        print(f"  {method:<4} legs={sub.num_rows:>8,} agents={n_a:>5}  calls/agent mean={mean:6.1f} "
+              f"min={per_agent[0]:>4} max={per_agent[-1]:>4}  top10%/bottom10%={top / max(bottom, 0.5):5.1f}x  "
+              f"agents handling half the calls={100.0 * half / n_a:4.1f}%")
     answered = table.filter(pc.equal(table["ANSWERED_FLAG"], 1))
     print(f"answered legs: {answered.num_rows:,}  mean talk={pc.mean(answered['TALK_TIME']).as_py():.0f}s  "
           f"mean hold={pc.mean(answered['HOLD_TIME']).as_py():.0f}s  mean acw={pc.mean(answered['ACW_TIME']).as_py():.0f}s  "

@@ -18,6 +18,9 @@ without touching production data.
   callback requested and fulfilled, blind / warm / external / multi-hop transfers, consults,
   conferences, system drops, outbound manual, dialer campaigns (incl. dialer drops), internal
   agent-to-agent calls, direct DID calls
+* Unbalanced queues (monster VQs plus a long tail of niche ones) and **Predictive Behavioural
+  Routing** on the sales/retention queues, so call distribution across agents is lopsided
+  (`ROUTING_METHOD`, `PBR_SCORE`)
 * Full lineage keys for multi-leg interactions: `INTERACTION_ID`, `ROOT_INTERACTION_ID`,
   `PARENT_INTERACTION_ID` / `PARENT_CALL_ID` (consults), `RELATED_INTERACTION_ID` (callbacks),
   `PREVIOUS_CALL_ID` and a tree-wide `SEGMENT_SEQ`
@@ -155,11 +158,18 @@ even when late legs spill past midnight (their `ARRIVE_TIME` is on the next day)
   service-level threshold and an optional overflow VQ. Because staffing is derived per queue, the
   big queues absorb the bursts (and suffer the abandons) while the small, multi-skilled-covered
   queues run at high service levels – change `vqs[].weight` to reshape the split.
+* **Routing method** – each VQ is either classic ACD (uniform pick among eligible agents) or
+  **PBR** (`pbr_enabled`, default on the sales and retention queues): agents are picked with
+  probability ∝ exp(`pbr_skew` × quality), raised to `pbr_premium_boost` for VIP/Enterprise
+  customers. Result: on PBR queues a minority of agents handle most calls while others starve;
+  `ROUTING_METHOD` and `PBR_SCORE` on every leg make the effect analysable
+  (see docs/SCENARIOS.md §8c).
 * **Agents** – the roster is *sized from the workload*: expected daily calls per VQ × AHT ÷
   occupancy ÷ shift length, spread across shift starts proportional to the forecast intraday
   volume, with two days off per agent (weekends more likely). Each agent has a site, team, tenure
-  band, primary skill (+ secondary skill within the LOB with 35% probability) and a personal speed
-  factor that scales talk and ACW time. Every open hour of every VQ is guaranteed at least
+  band, primary skill (+ secondary skill within the LOB with 35% probability), a personal speed
+  factor that scales talk and ACW time, and a PBR score (percentile rank of a tenure-shifted latent
+  quality) used by PBR queues. Every open hour of every VQ is guaranteed at least
   `min_agents_per_open_hour` eligible agents.
 * **Customers** – a pool (400k by default) with a skewed pick distribution so some customers call
   repeatedly (`REPEAT_CALL_7D_FLAG`, `FIRST_CALL_FLAG`), each with an ANI and a segment
@@ -256,8 +266,9 @@ checks listed (`--no-validate` skips this).
 | `outbound` | manual and dialer result mixes, campaigns, internal / DID answer rates |
 | `customers` | pool size, repeat-caller skew, segment mix |
 | `output` | directory, compression, partitioning, dimensions, validation |
-| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here |
+| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per VQ `pbr_enabled`, `pbr_skew`, `pbr_premium_boost` control predictive routing |
 | `vq_weights` | shortcut `{VQ name: relative weight}` to reshape the volume split without re-declaring `vqs` |
+| `vq_overrides` | shortcut `{VQ name: {field: value}}` to change any per-VQ field (e.g. `pbr_enabled`, hours, AHT) without re-declaring `vqs` |
 
 Examples:
 
@@ -276,6 +287,12 @@ staffing: {roster_factor: 0.8}
 
 # make one queue even more dominant and starve a niche one
 vq_weights: {VQ_CustServ_General: 0.4, VQ_Retention_VIP: 0.0005}
+
+# turn PBR on/off or retune any per-VQ field without re-declaring the vqs list
+vq_overrides:
+  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 1.0}     # 0 = uniform, 1.2 = extreme concentration
+  VQ_Sales_New: {pbr_enabled: false}
+  VQ_Billing_Payments: {close_hour: 23, service_level_s: 30}
 
 # one big file, no validation, gzip
 output: {partition_by_day: false, validate: false, compression: gzip}
@@ -298,9 +315,12 @@ generated, validated and written at a time; runtime is roughly 1.2 s per 30k-cal
   `VQ_Sales_New` 15 %, `VQ_Billing_Payments` 10 %, `VQ_Retention_Cancel` 8 % … down to
   `VQ_Retention_VIP` 0.3 % and `VQ_CustServ_Accessibility` 0.1 % (≈35 calls/day)
 
+* Agent load: ACD queues top-decile/bottom-decile ≈ 10×; PBR queues ≈ 30×, busiest agent 1 200+
+  calls a week while the least-favoured get a handful
+
 Run `python -m gim_synth summarize --out ./out` to see the distribution of results, resource
-roles, transfer types, LOBs, sites and the per-VQ volume / abandon / service-level table for your
-own output.
+roles, transfer types, LOBs, sites, the per-VQ volume / abandon / service-level table and the
+ACD-vs-PBR agent load comparison for your own output.
 
 ---
 

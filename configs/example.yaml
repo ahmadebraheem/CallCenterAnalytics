@@ -36,6 +36,12 @@ vq_weights:
   VQ_Retention_VIP: 0.001
   VQ_CustServ_Accessibility: 0.0005
 
+# Predictive Behavioural Routing: PBR queues route disproportionately to high-scoring agents.
+# Any VQConfig field can be overridden per queue here.
+vq_overrides:
+  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5}
+  VQ_Retention_Cancel: {pbr_skew: 1.2}      # even more concentrated than the default 1.0
+
 inbound:
   short_abandon_prob: 0.02
   rona_prob: 0.025

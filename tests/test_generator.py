@@ -124,6 +124,30 @@ def test_vq_volumes_are_unbalanced(small_run):
     assert ordered[0] > 25 * ordered[-1], "long tail VQs should be tiny compared with the biggest"
 
 
+def _agent_imbalance(table, method):
+    sub = table.filter(pc.and_(pc.equal(table["ROUTING_METHOD"], method), pc.equal(table["ANSWERED_FLAG"], 1)))
+    counts = sorted(sub.group_by("AGENT_ID").aggregate([("IRF_ID", "count")])["IRF_ID_count"].to_pylist())
+    dec = max(1, len(counts) // 10)
+    return sum(counts[-dec:]) / max(1, sum(counts[:dec])), sub.num_rows
+
+
+def test_pbr_skews_agent_distribution(small_run):
+    cfg, stats, table, out = small_run
+    inbound = table.filter(pc.and_(pc.equal(table["CALL_TYPE"], "Inbound"), pc.is_valid(table["VQ_NAME"])))
+    acd_ratio, n_acd = _agent_imbalance(inbound, "ACD")
+    pbr_ratio, n_pbr = _agent_imbalance(inbound, "PBR")
+    assert n_acd > 0 and n_pbr > 0
+    assert pbr_ratio > 2 * acd_ratio, f"PBR should be markedly more lopsided (acd={acd_ratio:.1f}, pbr={pbr_ratio:.1f})"
+    pbr_rows = table.filter(pc.equal(table["ROUTING_METHOD"], "PBR"))
+    pbr_vqs = {v.name for v in cfg.vqs if v.pbr_enabled}
+    assert set(pbr_rows["VQ_NAME"].to_pylist()) <= pbr_vqs
+    scored = pbr_rows.filter(pc.is_valid(pbr_rows["PBR_SCORE"]))
+    assert scored.num_rows > 0
+    assert pc.mean(scored["PBR_SCORE"]).as_py() > 0.6, "PBR should favour high-scoring agents"
+    assert set(table.filter(pc.equal(table["RESOURCE_TYPE"], "Agent"))["ROUTING_METHOD"].to_pylist()) <= {
+        "ACD", "PBR", "Direct", "Consult", "Conference", "Manual", "Dialer", "Internal", "Callback"}
+
+
 def test_burst_and_lull_profile():
     cfg = load_config(overrides={"bursts": {"rate_per_day": 3.0, "mega_prob": 1.0}, "lulls": {"rate_per_day": 3.0}})
     rng = np.random.default_rng(5)
@@ -149,3 +173,13 @@ def test_roster_covers_open_hours():
             for hour in range(24):
                 if v.is_open(dow, hour):
                     assert ref.staffed(v.idx, dow, hour) >= cfg.staffing.min_agents_per_open_hour
+
+
+def test_vq_overrides():
+    cfg = load_config(overrides={"vq_overrides": {"VQ_Tech_Tier1": {"pbr_enabled": True, "pbr_skew": 1.1}}})
+    v = {v.name: v for v in cfg.vqs}["VQ_Tech_Tier1"]
+    assert v.pbr_enabled is True and v.pbr_skew == 1.1
+    with pytest.raises(ValueError):
+        load_config(overrides={"vq_overrides": {"VQ_Tech_Tier1": {"nope": 1}}})
+    with pytest.raises(ValueError):
+        load_config(overrides={"vq_overrides": {"VQ_Nope": {"pbr_enabled": True}}})

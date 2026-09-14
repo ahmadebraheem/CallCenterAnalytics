@@ -61,6 +61,8 @@ COLUMNS: Dict[str, pa.DataType] = {
     "VQ_NAME": pa.string(),
     "ORIGINAL_VQ_NAME": pa.string(),
     "SKILL": pa.string(),
+    "ROUTING_METHOD": pa.string(),
+    "PBR_SCORE": pa.float32(),
     # ---- resource ----
     "AGENT_ID": pa.string(),
     "AGENT_NAME": pa.string(),

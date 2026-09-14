@@ -75,6 +75,8 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | `VQ_NAME` | string, nullable | Virtual queue the leg was distributed from / worked in. On overflowed legs this is the queue that finally handled the call. Null for direct DID, outbound manual, internal and external legs. |
 | `ORIGINAL_VQ_NAME` | string, nullable | Set when the call overflowed: the VQ the customer originally queued in. |
 | `SKILL` | string, nullable | Skill expression of the VQ. |
+| `ROUTING_METHOD` | string, nullable | How the resource was selected: `ACD` (longest-idle distribution from a non-PBR VQ), `PBR` (Predictive Behavioural Routing – agent chosen by predicted-outcome score; distribution across agents is deliberately lopsided), `Direct` (direct DID, transfer straight to an agent, warm-transfer receiver), `Consult`, `Conference`, `Manual` (agent-initiated outbound), `Dialer`, `Internal`, `Callback`. Queue legs (abandons, callback requests) carry the VQ's `ACD`/`PBR`; IVR and external legs are null. |
+| `PBR_SCORE` | float32, nullable | On `PBR`-routed agent legs only: the selected agent's PBR score, expressed as a percentile rank across the roster (0–1; 0.9 = better predicted outcomes than 90 % of agents). High-scoring agents are picked far more often, so the mean of this column on PBR queues sits well above 0.5. |
 
 ### Resource
 
@@ -130,12 +132,15 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 ### dim_vq
 `VQ_ID`, `VQ_NAME`, `QUEUE_ID`, `QUEUE_NAME`, `ROUTE_POINT`, `DNIS`, `LOB`, `SKILL`, `HOME_SITE`,
 `OPEN_HOUR`, `CLOSE_HOUR` (24 = midnight; 0/24 = 24x7), `OPEN_DAYS` (`Mon-Sun` / `Mon-Sat` / `Mon-Fri`),
-`SERVICE_LEVEL_S`, `OVERFLOW_VQ_NAME`, `ROSTER_SIZE` (agents skilled for the VQ), `EXPECTED_AHT_S`.
+`SERVICE_LEVEL_S`, `OVERFLOW_VQ_NAME`, `ROUTING_METHOD` (`ACD`/`PBR`), `PBR_ENABLED_FLAG`, `PBR_SKEW`
+(log-normal sigma of agent weights, null for ACD queues), `ROSTER_SIZE` (agents skilled for the VQ),
+`EXPECTED_AHT_S`.
 
 ### dim_agent
 `AGENT_ID`, `AGENT_NAME`, `AGENT_GROUP`, `SITE`, `LOB`, `AGENT_TENURE_BAND`, `PRIMARY_VQ_NAME`,
 `SKILLS` (pipe separated), `SHIFT_START_HOUR`, `SHIFT_LEN_H`, `DAYS_OFF` (pipe separated weekday
-names), `SPEED_FACTOR` (multiplier on talk / ACW), `AGENT_DID`.
+names), `SPEED_FACTOR` (multiplier on talk / ACW), `PBR_SCORE` (percentile rank 0–1 of the agent's
+predicted-outcome quality; drives how often PBR queues pick the agent), `AGENT_DID`.
 
 ### dim_customer
 `CUSTOMER_ID`, `ANI`, `CUSTOMER_SEGMENT`.

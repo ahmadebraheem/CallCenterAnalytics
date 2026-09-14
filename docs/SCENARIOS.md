@@ -132,11 +132,38 @@ levels with very few abandons. Closed queues still receive a trickle of after-ho
 (`after_hours_leak`) so every VQ appears every day. Overflow queues get almost no direct traffic;
 their volume comes from overflowed calls.
 
+## 8c. Routing method: ACD vs Predictive Behavioural Routing (PBR)
+
+Each VQ routes either by classic **ACD** (longest-idle, effectively a uniform pick among eligible
+agents) or by **PBR** (`pbr_enabled: true`). By default the sales and retention queues use PBR:
+`VQ_Sales_New`, `VQ_Sales_Upgrade`, `VQ_Sales_Spanish`, `VQ_Retention_Cancel`,
+`VQ_Retention_Save_Offers`, `VQ_Retention_VIP`.
+
+How PBR is modelled:
+
+* every agent has a latent quality `pbr_z` (normal, mean shifted by tenure) and a `PBR_SCORE`
+  percentile rank across the roster (`dim_agent.PBR_SCORE`);
+* on a PBR queue an eligible agent is selected with probability ∝ `exp(pbr_skew × pbr_z)`
+  (`pbr_skew` 0.5–1.0 by default), so the best-scoring agents receive several times the calls of
+  the weakest ones and some agents barely get calls at all;
+* for **VIP / Enterprise** customers the weights are raised to `pbr_premium_boost` (1.5–2.0),
+  concentrating premium calls even more on the top agents;
+* RONA, abandon-while-ringing and answered legs all use the same selection, so the imbalance is
+  visible on every agent-facing leg of the queue;
+* the fact rows record `ROUTING_METHOD` (`ACD`/`PBR`) and, on PBR agent legs, the chosen agent's
+  `PBR_SCORE`.
+
+Typical week (defaults): on ACD queues the top-decile agents handle ~10× the calls of the bottom
+decile (mostly shift / secondary-skill effects) and 30 % of agents handle half the calls; on PBR
+queues the ratio is ~30×, the busiest agent takes 1 200+ calls vs a few for the least-favoured, and
+under 20 % of agents handle half the calls. `python -m gim_synth summarize` prints this comparison.
+
 ## 9. Agent-level variation
 
 * **Speed factor** per agent (log-normal σ 0.15) × tenure (`<3m` 1.18, `3-12m` 1.06, `1-3y` 0.98, `3y+` 0.92) scales talk and ACW.
 * **Shifts** – 8.5 h, start hours weighted by the VQ's expected hourly volume; night shifts mostly staffed by the offshore site; two days off per agent (weekend off 42 %, Mon-Fri VQs always off at weekends). Every open hour of every VQ is guaranteed `min_agents_per_open_hour` eligible agents; the coverage agents added for thin queues work every open day.
 * **Skills** – primary VQ plus a secondary VQ in the same LOB (35 %), so multi-skilled agents appear across queues.
+* **PBR score** – latent quality per agent (tenure-shifted normal) that PBR queues use to pick agents; see §8c.
 
 ## 10. Customer-level variation
 

@@ -57,6 +57,11 @@ class VQConfig:
     service_level_s: int = 20
     overflow_vq: Optional[str] = None
     home_site: str = ""
+    # Predictive Behavioural Routing: when enabled, agents are chosen by their PBR score instead of
+    # longest-idle ACD, so call distribution across agents becomes lopsided.
+    pbr_enabled: bool = False
+    pbr_skew: float = 0.8             # log-normal sigma of agent weights; 0 = uniform, 1.2 = extreme
+    pbr_premium_boost: float = 1.6    # exponent applied to weights for VIP / Enterprise customers
 
 
 # --------------------------------------------------------------------------- #
@@ -268,23 +273,23 @@ def _default_vqs() -> List[VQConfig]:
     return [
         # ---- monster queues (~60 % of inbound volume) ----
         VQConfig("VQ_CustServ_General", "CustomerService", "SK_CS_General", 0.270, 0, 24, "Mon-Sun", 270, 0.6, 0.30, 55, 35, 7, 120, 1.0, 20, "VQ_Overflow_Service", "Manila"),
-        VQConfig("VQ_Sales_New", "Sales", "SK_Sales_New", 0.190, 8, 21, "Mon-Sun", 330, 0.55, 0.25, 45, 40, 6, 110, 1.0, 20, "VQ_Overflow_Sales", "Dallas"),
+        VQConfig("VQ_Sales_New", "Sales", "SK_Sales_New", 0.190, 8, 21, "Mon-Sun", 330, 0.55, 0.25, 45, 40, 6, 110, 1.0, 20, "VQ_Overflow_Sales", "Dallas", pbr_enabled=True, pbr_skew=0.8, pbr_premium_boost=1.6),
         VQConfig("VQ_Tech_Tier1", "TechSupport", "SK_Tech_T1", 0.150, 0, 24, "Mon-Sun", 420, 0.65, 0.45, 95, 50, 10, 150, 1.0, 30, "VQ_Overflow_Service", "Manila"),
         # ---- mid-size queues ----
         VQConfig("VQ_Billing_Payments", "Billing", "SK_Billing", 0.100, 7, 22, "Mon-Sun", 240, 0.55, 0.25, 45, 30, 6, 120, 1.0, 20, "VQ_CustServ_General", "Phoenix"),
-        VQConfig("VQ_Retention_Cancel", "Retention", "SK_Retention", 0.090, 8, 22, "Mon-Sun", 520, 0.55, 0.45, 90, 70, 12, 180, 0.9, 30, "VQ_Retention_Save_Offers", "Dallas"),
-        VQConfig("VQ_Sales_Upgrade", "Sales", "SK_Sales_Upgrade", 0.050, 8, 21, "Mon-Sun", 280, 0.55, 0.30, 50, 40, 7, 120, 1.0, 20, "VQ_Overflow_Sales", "Phoenix"),
+        VQConfig("VQ_Retention_Cancel", "Retention", "SK_Retention", 0.090, 8, 22, "Mon-Sun", 520, 0.55, 0.45, 90, 70, 12, 180, 0.9, 30, "VQ_Retention_Save_Offers", "Dallas", pbr_enabled=True, pbr_skew=1.0, pbr_premium_boost=1.8),
+        VQConfig("VQ_Sales_Upgrade", "Sales", "SK_Sales_Upgrade", 0.050, 8, 21, "Mon-Sun", 280, 0.55, 0.30, 50, 40, 7, 120, 1.0, 20, "VQ_Overflow_Sales", "Phoenix", pbr_enabled=True, pbr_skew=0.7, pbr_premium_boost=1.6),
         VQConfig("VQ_CustServ_Account", "CustomerService", "SK_CS_Account", 0.045, 7, 23, "Mon-Sun", 310, 0.6, 0.35, 60, 40, 7, 130, 1.0, 20, "VQ_CustServ_General", "Phoenix"),
-        VQConfig("VQ_Retention_Save_Offers", "Retention", "SK_Retention_Offers", 0.030, 8, 22, "Mon-Sun", 460, 0.5, 0.40, 80, 60, 10, 160, 0.9, 30, None, "Toronto"),
+        VQConfig("VQ_Retention_Save_Offers", "Retention", "SK_Retention_Offers", 0.030, 8, 22, "Mon-Sun", 460, 0.5, 0.40, 80, 60, 10, 160, 0.9, 30, None, "Toronto", pbr_enabled=True, pbr_skew=0.9, pbr_premium_boost=1.8),
         # ---- small queues ----
         VQConfig("VQ_Tech_Tier2", "TechSupport", "SK_Tech_T2", 0.020, 7, 23, "Mon-Sun", 780, 0.6, 0.55, 140, 90, 22, 240, 0.8, 60, None, "Dallas"),
         VQConfig("VQ_Collections_Inbound", "Collections", "SK_Collections", 0.015, 8, 21, "Mon-Sat", 300, 0.6, 0.30, 60, 45, 10, 140, 1.0, 30, "VQ_Billing_Payments", "Dallas"),
         VQConfig("VQ_Billing_Disputes", "Billing", "SK_Billing_Disputes", 0.012, 8, 20, "Mon-Fri", 480, 0.55, 0.45, 100, 75, 14, 200, 0.9, 30, None, "Dallas"),
         VQConfig("VQ_Retention_Loyalty", "Retention", "SK_Loyalty", 0.008, 9, 20, "Mon-Sat", 400, 0.5, 0.35, 70, 55, 9, 150, 0.9, 30, "VQ_Retention_Save_Offers", "Toronto"),
         # ---- long tail: niche queues with a few dozen calls a day ----
-        VQConfig("VQ_Sales_Spanish", "Sales", "SK_Sales_Spanish", 0.006, 9, 20, "Mon-Sat", 360, 0.55, 0.25, 45, 40, 12, 110, 1.0, 20, "VQ_Sales_New", "Phoenix"),
+        VQConfig("VQ_Sales_Spanish", "Sales", "SK_Sales_Spanish", 0.006, 9, 20, "Mon-Sat", 360, 0.55, 0.25, 45, 40, 12, 110, 1.0, 20, "VQ_Sales_New", "Phoenix", pbr_enabled=True, pbr_skew=0.5, pbr_premium_boost=1.5),
         VQConfig("VQ_Tech_Enterprise", "TechSupport", "SK_Tech_Enterprise", 0.004, 7, 22, "Mon-Fri", 900, 0.6, 0.55, 150, 120, 20, 300, 0.8, 60, None, "Dallas"),
-        VQConfig("VQ_Retention_VIP", "Retention", "SK_VIP", 0.003, 8, 22, "Mon-Sun", 600, 0.5, 0.40, 80, 90, 5, 240, 0.9, 15, "VQ_Retention_Cancel", "Toronto"),
+        VQConfig("VQ_Retention_VIP", "Retention", "SK_VIP", 0.003, 8, 22, "Mon-Sun", 600, 0.5, 0.40, 80, 90, 5, 240, 0.9, 15, "VQ_Retention_Cancel", "Toronto", pbr_enabled=True, pbr_skew=0.6, pbr_premium_boost=2.0),
         VQConfig("VQ_Overflow_Sales", "Sales", "SK_Sales_New", 0.003, 8, 21, "Mon-Sun", 330, 0.55, 0.25, 45, 40, 15, 110, 1.0, 20, None, "Manila"),
         VQConfig("VQ_CustServ_Accessibility", "CustomerService", "SK_CS_Accessibility", 0.002, 8, 20, "Mon-Fri", 520, 0.5, 0.30, 60, 60, 8, 200, 0.9, 30, "VQ_CustServ_General", "Toronto"),
         VQConfig("VQ_Overflow_Service", "CustomerService", "SK_CS_General", 0.002, 0, 24, "Mon-Sun", 290, 0.6, 0.30, 55, 35, 15, 120, 1.0, 20, None, "Manila"),
@@ -322,16 +327,27 @@ class GeneratorConfig:
     # Optional shortcut: override just the volume share of some VQs (name -> weight) without
     # re-declaring the whole `vqs` list.  Weights are relative; they need not sum to 1.
     vq_weights: Dict[str, float] = field(default_factory=dict)
+    # Optional shortcut: override any VQConfig fields of some VQs, e.g.
+    #   vq_overrides: {VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 1.0}, VQ_Sales_New: {close_hour: 23}}
+    vq_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # ----------------------------------------------------------------- #
     def apply_vq_weights(self) -> None:
         by_name = {v.name: v for v in self.vqs}
+        vq_fields = {f.name for f in fields(VQConfig)}
         for name, w in self.vq_weights.items():
             if name not in by_name:
                 raise ValueError(f"vq_weights references unknown VQ {name}")
             if w < 0:
                 raise ValueError(f"vq_weights[{name}] must be >= 0")
             by_name[name].weight = float(w)
+        for name, overrides in self.vq_overrides.items():
+            if name not in by_name:
+                raise ValueError(f"vq_overrides references unknown VQ {name}")
+            for key, val in (overrides or {}).items():
+                if key not in vq_fields or key == "name":
+                    raise ValueError(f"vq_overrides[{name}]: unknown VQ field {key}")
+                setattr(by_name[name], key, val)
 
     def validate(self) -> None:
         self.apply_vq_weights()

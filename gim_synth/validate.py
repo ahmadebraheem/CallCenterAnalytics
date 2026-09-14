@@ -95,6 +95,11 @@ def validate_table(t: pa.Table, cfg: GeneratorConfig, service_levels: dict) -> L
           pc.and_(pc.equal(c["CALL_TYPE"], "Consult"), pc.not_equal(c["N_CUSTOMER"], 0)))
     check("Internal legs have N_CUSTOMER == 0",
           pc.and_(pc.equal(c["CALL_TYPE"], "Internal"), pc.not_equal(c["N_CUSTOMER"], 0)))
+    check("Agent legs have ROUTING_METHOD",
+          pc.and_(pc.equal(c["RESOURCE_TYPE"], "Agent"), pc.is_null(c["ROUTING_METHOD"])))
+    check("PBR_SCORE present iff PBR-routed agent leg",
+          pc.xor(pc.is_valid(c["PBR_SCORE"]),
+                 pc.and_(pc.equal(c["ROUTING_METHOD"], "PBR"), pc.is_valid(c["AGENT_ID"]))))
     check("voice only", pc.not_equal(c["MEDIA_TYPE"], "voice"))
     check("CALL_RESULT_CODE present", pc.is_null(c["CALL_RESULT_CODE"]))
 

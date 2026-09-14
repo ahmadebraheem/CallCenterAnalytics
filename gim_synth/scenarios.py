@@ -122,16 +122,48 @@ class LegBuilder:
     def _abs(self, t: float) -> float:
         return self.day_index * DAY_S + t
 
-    def _pick_agent(self, vq: VQ, t: float, exclude: Optional[int] = None) -> Agent:
+    def _pick_agent(self, vq: VQ, t: float, exclude: Optional[int] = None, premium: bool = False) -> Agent:
+        """Select an agent for the VQ at time t.
+
+        ACD queues pick uniformly among eligible agents (longest-idle behaves ~uniformly over a day).
+        PBR queues pick proportionally to exp(skew * agent quality), so high-scoring agents receive
+        far more calls than low-scoring ones; VIP / Enterprise customers concentrate this further.
+        """
         dow, hour = self._dow_hour(t)
-        pool = self.ref.eligible.get((vq.idx, dow, hour)) or self.ref.agents_by_vq[vq.idx]
-        a = self.ref.agents[self.r.choice(pool)]
+        key = (vq.idx, dow, hour)
+        pool = self.ref.eligible.get(key)
+        cum = None
+        if pool:
+            if vq.cfg.pbr_enabled:
+                cum = self.ref.pbr_cum.get(key)
+        else:
+            pool = self.ref.agents_by_vq[vq.idx]
+            if vq.cfg.pbr_enabled:
+                cum = self.ref.pbr_cum_all.get(vq.idx)
+
+        def draw() -> Agent:
+            if cum is None:
+                return self.ref.agents[self.r.choice(pool)]
+            return self.ref.agents[self.r.choices(pool, cum_weights=cum[1] if premium else cum[0])[0]]
+
+        a = draw()
         if exclude is not None and a.idx == exclude and len(pool) > 1:
             for _ in range(5):
-                a = self.ref.agents[self.r.choice(pool)]
+                a = draw()
                 if a.idx != exclude:
                     break
         return a
+
+    def _is_premium(self, ctx: Ctx) -> bool:
+        return ctx.cust is not None and self.ref.customer_segment[ctx.cust] in ("VIP", "Enterprise")
+
+    def _routing(self, row: dict, vq: VQ, agent: Optional[Agent] = None) -> None:
+        if vq.cfg.pbr_enabled:
+            row["ROUTING_METHOD"] = "PBR"
+            if agent is not None:
+                row["PBR_SCORE"] = agent.pbr_score
+        else:
+            row["ROUTING_METHOD"] = "ACD"
 
     def _pick_agent_any(self, t: float, exclude: Optional[int] = None) -> Agent:
         dow, hour = self._dow_hour(t)
@@ -305,6 +337,7 @@ class LegBuilder:
         short = int(round(qt)) < self.cfg.short_abandon_threshold_s
         row = self._base(ctx, arrive, "Inbound", "Queue", role, scenario)
         self._route(row, vq, orig_vq)
+        self._routing(row, vq)
         self._transfer_in(row, transfer_type)
         self._finish(row, ivr, qt, 0, answered=False)
         self._result(row, "ShortAbandon" if short else "Abandoned", "Abandoned", "AbandonedWhileQueued", "Customer")
@@ -322,12 +355,14 @@ class LegBuilder:
         ew = float(self.ew[vq.idx][m])
         orig_vq: Optional[VQ] = None
         rows: List[dict] = []
+        premium = self._is_premium(ctx)
 
         # ---- callback offer when the queue is badly backed up ---- #
         if role == "Received" and ew >= ib.callback_offer_wait_s and self.r.random() < ib.callback_accept_prob:
             qt = self.r.uniform(15, 60)
             row = self._base(ctx, arrive, "Inbound", "Queue", role, "callback_requested")
             self._route(row, vq)
+            self._routing(row, vq)
             self._finish(row, ivr, qt, 0, answered=False)
             self._result(row, "CallbackRequested", "Diverted", "CallbackAccepted", "Customer")
             row["CALLBACK_REQUESTED_FLAG"] = 1
@@ -356,10 +391,11 @@ class LegBuilder:
 
         # ---- RONA: agent alerted but did not answer, call re-queued ---- #
         if self.r.random() < ib.rona_prob:
-            agent = self._pick_agent(vq, t_q + wait)
+            agent = self._pick_agent(vq, t_q + wait, premium=premium)
             row = self._base(ctx, arrive, "Inbound", "Agent", role, "rona")
             self._route(row, vq, orig_vq)
             self._agent(row, agent)
+            self._routing(row, vq, agent)
             self._transfer_in(row, transfer_type)
             self._finish(row, ivr, wait, ib.rona_ring_s, answered=False)
             self._result(row, "RONA", "Redirected", "RouteOnNoAnswer", None)
@@ -378,10 +414,11 @@ class LegBuilder:
         # ---- customer drops while the agent's phone is ringing ---- #
         ring = self._ring()
         if self.r.random() < ib.abandon_while_ringing_prob:
-            agent = self._pick_agent(vq, t_q + wait)
+            agent = self._pick_agent(vq, t_q + wait, premium=premium)
             row = self._base(ctx, arrive, "Inbound", "Agent", role, "abandon_ringing")
             self._route(row, vq, orig_vq)
             self._agent(row, agent)
+            self._routing(row, vq, agent)
             self._transfer_in(row, transfer_type)
             self._finish(row, ivr, wait, ring * self.r.uniform(0.2, 0.9), answered=False)
             self._result(row, "Abandoned", "Abandoned", "AbandonedWhileRinging", "Customer")
@@ -389,7 +426,7 @@ class LegBuilder:
             rows.append(row)
             return rows
 
-        agent = self._pick_agent(vq, t_q + wait + ring)
+        agent = self._pick_agent(vq, t_q + wait + ring, premium=premium)
         rows.extend(self._handle(ctx, arrive, ivr, wait, ring, vq, orig_vq, agent, role, transfer_type))
         return rows
 
@@ -411,6 +448,7 @@ class LegBuilder:
         row = self._base(ctx, arrive, "Inbound", "Agent", role, outcome)
         self._route(row, vq, orig_vq)
         self._agent(row, agent)
+        self._routing(row, vq, agent)
         self._transfer_in(row, transfer_type)
         rows = [row]
         children: List[dict] = []
@@ -545,6 +583,7 @@ class LegBuilder:
                 # transferred into a closed queue -> after-hours announcement
                 leg = self._base(ctx, t, "Inbound", "IVR", "ReceivedTransfer", "transfer_to_closed_vq")
                 self._route(leg, target)
+                self._routing(leg, target)
                 self._transfer_in(leg, transfer_type)
                 self._finish(leg, self.r.uniform(8, 30), 0, 0, answered=False)
                 self._result(leg, "AfterHours", "Completed", "AfterHoursAnnouncement", "Customer")
@@ -562,6 +601,7 @@ class LegBuilder:
         self._agent(row, agent)
         row["LOB"] = agent.lob
         row["DNIS"] = agent.did
+        row["ROUTING_METHOD"] = "Direct"
         self._transfer_in(row, transfer_type)
         talk_vq = (self.vqs_by_lob.get(agent.lob) or [lob_vq])[0]
         if self.r.random() < 0.92:
@@ -587,6 +627,7 @@ class LegBuilder:
         row["PARENT_CALL_ID"] = parent["CALL_ID"]
         self._route(row, vq)
         self._agent(row, agent)
+        row["ROUTING_METHOD"] = "Consult"
         row["ANI"] = parent["AGENT_ID"]
         row["DNIS"] = agent.did
         row["CUSTOMER_ID"], row["CUSTOMER_SEGMENT"] = None, None
@@ -602,6 +643,7 @@ class LegBuilder:
         row = self._base(ctx, t, "Inbound", "Agent", "ReceivedTransfer", "warm_transfer_received")
         self._route(row, vq)
         self._agent(row, agent)
+        row["ROUTING_METHOD"] = "Direct"
         self._transfer_in(row, "Warm")
         talk = self._talk(vq, agent, 0.85)
         hold, holds = (self._hold(vq), 1) if self.r.random() < vq.cfg.hold_prob * 0.6 else (0.0, 0)
@@ -616,6 +658,7 @@ class LegBuilder:
         row = self._base(ctx, t, "Inbound", "Agent", "ConferenceJoined", "conference_joined")
         self._route(row, vq)
         self._agent(row, agent)
+        row["ROUTING_METHOD"] = "Conference"
         self._finish(row, 0, 0, 0, True, dur, 0, 0, self._acw(vq, agent, 0.5))
         self._result(row, "Answered", "Conferenced", "ConferenceJoined", "Agent")
         row["CONFERENCE_FLAG"] = 1
@@ -665,6 +708,7 @@ class LegBuilder:
         ctx = self._new_ctx(cust, t)
         row = self._base(ctx, t, "Outbound", "Agent", "Initiated", "outbound_manual")
         self._agent(row, agent)
+        row["ROUTING_METHOD"] = "Manual"
         row["LOB"] = agent.lob
         row["DNIS"] = self.ref.customer_ani[cust]
         row["ANI"] = next((s.outbound_cli for s in self.cfg.sites if s.name == agent.site), None)
@@ -681,6 +725,7 @@ class LegBuilder:
         if result == "DialerDrop":
             row = self._base(ctx, t, "Outbound", "Dialer", "Initiated", "dialer_drop")
             row["LOB"], row["CAMPAIGN_NAME"] = lob, campaign
+            row["ROUTING_METHOD"] = "Dialer"
             row["DNIS"] = self.ref.customer_ani[cust]
             self._finish(row, 0, self.r.uniform(2, 10), self.r.uniform(4, 20), False)
             self._result(row, "DialerDrop", "Abandoned", "NoAgentAvailable", "System")
@@ -690,6 +735,7 @@ class LegBuilder:
         row = self._base(ctx, t, "Outbound", "Agent", "Received", "dialer_" + result.lower())
         self._agent(row, agent)
         row["LOB"], row["CAMPAIGN_NAME"] = lob, campaign
+        row["ROUTING_METHOD"] = "Dialer"
         row["DNIS"] = self.ref.customer_ani[cust]
         row["ANI"] = next((s.outbound_cli for s in self.cfg.sites if s.name == agent.site), None)
         self._outbound_result(row, result, self.r.uniform(3, 20), self._talk(vq, agent, 0.75), self._acw(vq, agent), vq)
@@ -720,6 +766,7 @@ class LegBuilder:
         row2["ANI"], row2["DNIS"] = a.did, b.did
         self._finish(row2, 0, 0, ring, answered, talk, 0, 0, 0)
         for row in (row1, row2):
+            row["ROUTING_METHOD"] = "Internal"
             if answered:
                 self._result(row, "Answered", "Completed", "InternalCall", "Agent")
             else:
@@ -734,6 +781,7 @@ class LegBuilder:
         row = self._base(ctx, t, "Inbound", "Agent", "Received", "direct_did")
         self._agent(row, agent)
         row["LOB"], row["DNIS"] = agent.lob, agent.did
+        row["ROUTING_METHOD"] = "Direct"
         ring = self.r.uniform(3, 25)
         if self.r.random() < self.cfg.outbound.did_answer_prob:
             talk = self._talk(vq, agent, 0.8)
@@ -757,6 +805,7 @@ class LegBuilder:
         self._agent(row, agent)
         row["RELATED_INTERACTION_ID"] = pc.root_iid
         row["CALLBACK_FLAG"] = 1
+        row["ROUTING_METHOD"] = "Callback"
         row["DNIS"] = self.ref.customer_ani[pc.cust]
         row["ANI"] = vq.dnis
         u = self.r.random()

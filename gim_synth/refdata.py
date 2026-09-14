@@ -76,6 +76,8 @@ class Agent:
     days_off: Set[int]
     speed: float                   # multiplier on talk / ACW (1.0 = average)
     did: str
+    pbr_z: float = 0.0             # latent PBR quality (standard normal); drives routing weight
+    pbr_score: float = 0.5         # percentile rank of pbr_z across the roster (0..1), reported on legs
 
     def on_shift(self, dow: int, hour: int) -> bool:
         """True if the agent's shift (possibly wrapping past midnight) covers (dow, hour)."""
@@ -105,6 +107,10 @@ class RefData:
     customer_ids: List[str]
     customer_ani: List[str]
     customer_segment: List[str]
+    # PBR queues only: cumulative selection weights aligned with `eligible` / `agents_by_vq` pools.
+    # key -> (standard cum weights, premium-customer cum weights)
+    pbr_cum: Dict[Tuple[int, int, int], Tuple[List[float], List[float]]] = field(default_factory=dict)
+    pbr_cum_all: Dict[int, Tuple[List[float], List[float]]] = field(default_factory=dict)
     intraday_shape_hourly: np.ndarray = field(default_factory=lambda: np.ones(24) / 24)
 
     # ------------------------------------------------------------------ #
@@ -137,6 +143,9 @@ class RefData:
             "OPEN_DAYS": [v.cfg.days for v in self.vqs],
             "SERVICE_LEVEL_S": pa.array([v.cfg.service_level_s for v in self.vqs], pa.int16()),
             "OVERFLOW_VQ_NAME": [v.cfg.overflow_vq for v in self.vqs],
+            "ROUTING_METHOD": ["PBR" if v.cfg.pbr_enabled else "ACD" for v in self.vqs],
+            "PBR_ENABLED_FLAG": pa.array([int(v.cfg.pbr_enabled) for v in self.vqs], pa.int8()),
+            "PBR_SKEW": pa.array([v.cfg.pbr_skew if v.cfg.pbr_enabled else None for v in self.vqs], pa.float32()),
             "ROSTER_SIZE": pa.array([len(self.agents_by_vq.get(v.idx, [])) for v in self.vqs], pa.int32()),
             "EXPECTED_AHT_S": pa.array([round(v.aht_s, 1) for v in self.vqs], pa.float32()),
         })
@@ -153,6 +162,7 @@ class RefData:
             "SHIFT_LEN_H": pa.array([a.shift_len_h for a in self.agents], pa.float32()),
             "DAYS_OFF": ["|".join(DOW_NAMES[d] for d in sorted(a.days_off)) for a in self.agents],
             "SPEED_FACTOR": pa.array([round(a.speed, 3) for a in self.agents], pa.float32()),
+            "PBR_SCORE": pa.array([round(a.pbr_score, 4) for a in self.agents], pa.float32()),
             "AGENT_DID": [a.did for a in self.agents],
         })
         dim_customer = pa.table({
@@ -273,10 +283,12 @@ def build_refdata(cfg: GeneratorConfig) -> RefData:
             days_off = {d1, d2}
         tenure = rng.choices(TENURE_BANDS, TENURE_WEIGHTS)[0]
         speed = math.exp(rng.gauss(0, 0.15)) * {"<3m": 1.18, "3-12m": 1.06, "1-3y": 0.98, "3y+": 0.92}[tenure]
+        # PBR quality correlates with tenure but keeps plenty of individual spread
+        pbr_z = rng.gauss({"<3m": -0.6, "3-12m": -0.2, "1-3y": 0.2, "3y+": 0.5}[tenure], 0.9)
         a = Agent(
             idx=idx, agent_id=f"AG{100000 + idx:06d}", name=name, site=site, group=group, lob=v.lob,
             tenure_band=tenure, skills=skills, shift_start_h=start, shift_len_h=st.shift_len_h,
-            days_off=days_off, speed=speed, did=f"1214555{idx:04d}",
+            days_off=days_off, speed=speed, did=f"1214555{idx:04d}", pbr_z=pbr_z,
         )
         agents.append(a)
         for s in skills:
@@ -320,6 +332,33 @@ def build_refdata(cfg: GeneratorConfig) -> RefData:
                     a.days_off = set(range(7)) - v.open_days
                     eligible, on_shift = build_indexes()
 
+    # ---------------- PBR scores and weighted pools ---------------- #
+    order = sorted(range(len(agents)), key=lambda i: agents[i].pbr_z)
+    for rank, i in enumerate(order):
+        agents[i].pbr_score = (rank + 0.5) / len(agents)
+
+    def cum_weights(pool: Sequence[int], v: VQ) -> Tuple[List[float], List[float]]:
+        std, prem, acc_s, acc_p = [], [], 0.0, 0.0
+        for i in pool:
+            w = math.exp(v.cfg.pbr_skew * agents[i].pbr_z)
+            acc_s += w
+            acc_p += w ** v.cfg.pbr_premium_boost
+            std.append(acc_s)
+            prem.append(acc_p)
+        return std, prem
+
+    pbr_cum: Dict[Tuple[int, int, int], Tuple[List[float], List[float]]] = {}
+    pbr_cum_all: Dict[int, Tuple[List[float], List[float]]] = {}
+    for v in vqs:
+        if not v.cfg.pbr_enabled:
+            continue
+        pbr_cum_all[v.idx] = cum_weights(agents_by_vq[v.idx], v)
+        for dow in range(7):
+            for hour in range(24):
+                pool = eligible.get((v.idx, dow, hour))
+                if pool:
+                    pbr_cum[(v.idx, dow, hour)] = cum_weights(pool, v)
+
     # ---------------- Customers ---------------- #
     n = cfg.customers.pool_size
     seg_names = list(cfg.customers.segments)
@@ -334,6 +373,7 @@ def build_refdata(cfg: GeneratorConfig) -> RefData:
     return RefData(
         cfg=cfg, sites=sites, lobs=lobs, vqs=vqs, vq_by_name=vq_by_name, agents=agents,
         eligible=eligible, on_shift=on_shift, agents_by_vq=agents_by_vq,
+        pbr_cum=pbr_cum, pbr_cum_all=pbr_cum_all,
         customer_ids=customer_ids, customer_ani=customer_ani, customer_segment=seg.tolist(),
         intraday_shape_hourly=hourly_shape,
     )

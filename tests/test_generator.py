@@ -183,3 +183,50 @@ def test_vq_overrides():
         load_config(overrides={"vq_overrides": {"VQ_Tech_Tier1": {"nope": 1}}})
     with pytest.raises(ValueError):
         load_config(overrides={"vq_overrides": {"VQ_Nope": {"pbr_enabled": True}}})
+
+
+def test_full_config_yaml_matches_defaults():
+    import math
+    from gim_synth.config import config_to_dict
+
+    def flat(d, prefix=""):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                yield from flat(v, f"{prefix}/{k}")
+        elif isinstance(d, list):
+            for i, v in enumerate(d):
+                yield from flat(v, f"{prefix}[{i}]")
+        else:
+            yield prefix, d
+
+    a = dict(flat(config_to_dict(load_config("configs/full_config.yaml"))))
+    b = dict(flat(config_to_dict(default_config())))
+    assert a.keys() == b.keys()
+    for k in a:
+        if isinstance(a[k], float) or isinstance(b[k], float):
+            assert math.isclose(a[k], b[k]), k
+        else:
+            assert a[k] == b[k], k
+
+
+def test_per_vq_behaviour_overrides(tmp_path):
+    cfg = load_config(overrides={
+        "start_date": "2026-08-04", "days": 1, "calls_per_day": 4000, "seed": 5,
+        "customers": {"pool_size": 5000},
+        "bursts": {"rate_per_day": 0, "mega_prob": 0}, "lulls": {"rate_per_day": 0},
+        "vq_overrides": {
+            "VQ_Tech_Tier1": {"rona_prob": 0.0, "short_abandon_prob": 0.25, "abandon_while_ringing_prob": 0.0},
+            "VQ_Tech_Tier2": {"rona_prob": 0.3, "wait_scale": 4.0},
+        },
+        "output": {"directory": str(tmp_path)},
+    })
+    generate(cfg)
+    t = ds.dataset(os.path.join(tmp_path, "interaction_resource_fact"), format="parquet",
+                   partitioning="hive").to_table()
+    t1 = t.filter(pc.equal(t["VQ_NAME"], "VQ_Tech_Tier1"))
+    t2 = t.filter(pc.equal(t["VQ_NAME"], "VQ_Tech_Tier2"))
+    assert pc.sum(t1["RONA_FLAG"]).as_py() == 0
+    assert pc.sum(t1["SHORT_ABANDON_FLAG"]).as_py() / t1.num_rows > 0.15
+    assert pc.sum(t2["RONA_FLAG"]).as_py() / t2.num_rows > 0.1
+    other = t.filter(pc.and_(pc.is_valid(t["VQ_NAME"]), pc.not_equal(t["VQ_NAME"], "VQ_Tech_Tier2")))
+    assert pc.mean(t2["QUEUE_TIME"]).as_py() > 2 * pc.mean(other["QUEUE_TIME"]).as_py()

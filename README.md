@@ -249,9 +249,16 @@ checks listed (`--no-validate` skips this).
 
 ## 5. Configuration
 
-`python -m gim_synth print-config` dumps every knob with its default. A YAML passed with
-`--config` is deep-merged over the defaults; CLI flags win over both. Lists (`sites`, `lobs`,
-`vqs`) are replaced wholesale when present. Unknown keys raise an error.
+**[`configs/full_config.yaml`](configs/full_config.yaml)** is the complete, annotated reference:
+every knob with its default value, a one-line explanation and a tuning cheat-sheet at the top
+(abandons, bursts, PBR, L1/L2 tech support, transfers, volume split). It loads to exactly the
+defaults (guarded by a test), so copy it and change what you need. `configs/example.yaml` is a
+shorter override-only example.
+
+`python -m gim_synth print-config` dumps the effective configuration (defaults + your file) as
+plain YAML. A YAML passed with `--config` is deep-merged over the defaults; CLI flags win over
+both. Lists (`sites`, `lobs`, `vqs`) are replaced wholesale when present. Unknown keys raise an
+error.
 
 | Section | Purpose |
 |---|---|
@@ -266,7 +273,7 @@ checks listed (`--no-validate` skips this).
 | `outbound` | manual and dialer result mixes, campaigns, internal / DID answer rates |
 | `customers` | pool size, repeat-caller skew, segment mix |
 | `output` | directory, compression, partitioning, dimensions, validation |
-| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per VQ `pbr_enabled`, `pbr_skew`, `pbr_premium_boost` control predictive routing |
+| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per VQ: hours, AHT, holds, ACW, base ASA, patience, SL threshold, overflow, `pbr_enabled` / `pbr_skew` / `pbr_premium_boost`, and optional per-queue overrides `short_abandon_prob`, `abandon_while_ringing_prob`, `rona_prob`, `ivr_contained_prob`, `wait_scale` |
 | `vq_weights` | shortcut `{VQ name: relative weight}` to reshape the volume split without re-declaring `vqs` |
 | `vq_overrides` | shortcut `{VQ name: {field: value}}` to change any per-VQ field (e.g. `pbr_enabled`, hours, AHT) without re-declaring `vqs` |
 
@@ -293,6 +300,12 @@ vq_overrides:
   VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 1.0}     # 0 = uniform, 1.2 = extreme concentration
   VQ_Sales_New: {pbr_enabled: false}
   VQ_Billing_Payments: {close_hour: 23, service_level_s: 30}
+
+# L1 vs L2 tech support: impatient L1 callers with more short abandons and RONA,
+# patient L2 callers on a slow, long-AHT queue
+vq_overrides:
+  VQ_Tech_Tier1: {patience_median_s: 90, short_abandon_prob: 0.03, rona_prob: 0.04}
+  VQ_Tech_Tier2: {patience_median_s: 400, wait_scale: 1.5, talk_median_s: 900, service_level_s: 90}
 
 # one big file, no validation, gzip
 output: {partition_by_day: false, validate: false, compression: gzip}

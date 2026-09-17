@@ -212,7 +212,12 @@ class LegBuilder:
 
     def _wait(self, vq: VQ, t: float) -> float:
         ew = float(self.ew[vq.idx][self._minute(t)])
-        return self._gamma(self.cfg.queue_model.wait_gamma_shape, ew)
+        return self._gamma(self.cfg.queue_model.wait_gamma_shape, ew) * vq.cfg.wait_scale
+
+    @staticmethod
+    def _vq_or_global(vq: VQ, name: str, default: float) -> float:
+        override = getattr(vq.cfg, name)
+        return default if override is None else override
 
     def _patience(self, vq: VQ) -> float:
         return self._lognorm(vq.cfg.patience_median_s, vq.cfg.patience_sigma)
@@ -308,7 +313,7 @@ class LegBuilder:
         ctx = self._new_ctx(cust, t)
         ivr = max(cfg.ivr.min_s, self.r.gauss(cfg.ivr.mean_s, cfg.ivr.sd_s))
 
-        if self.r.random() < cfg.ivr.contained_prob:
+        if self.r.random() < self._vq_or_global(vq, "ivr_contained_prob", cfg.ivr.contained_prob):
             row = self._base(ctx, t, "Inbound", "IVR", "Received", "ivr_self_service")
             row["ROUTE_POINT"], row["DNIS"], row["LOB"] = vq.route_point, vq.dnis, vq.lob
             self._finish(row, ivr * self.r.uniform(1.5, 4.5), 0, 0, answered=False)
@@ -374,7 +379,7 @@ class LegBuilder:
 
         wait = self._wait(vq, t_q)
         patience = self._patience(vq)
-        if self.r.random() < ib.short_abandon_prob:
+        if self.r.random() < self._vq_or_global(vq, "short_abandon_prob", ib.short_abandon_prob):
             patience = self.r.uniform(0.5, self.cfg.short_abandon_threshold_s - 0.6)
 
         # ---- overflow to a backup VQ after waiting too long ---- #
@@ -390,7 +395,7 @@ class LegBuilder:
             return rows
 
         # ---- RONA: agent alerted but did not answer, call re-queued ---- #
-        if self.r.random() < ib.rona_prob:
+        if self.r.random() < self._vq_or_global(vq, "rona_prob", ib.rona_prob):
             agent = self._pick_agent(vq, t_q + wait, premium=premium)
             row = self._base(ctx, arrive, "Inbound", "Agent", role, "rona")
             self._route(row, vq, orig_vq)
@@ -413,7 +418,7 @@ class LegBuilder:
 
         # ---- customer drops while the agent's phone is ringing ---- #
         ring = self._ring()
-        if self.r.random() < ib.abandon_while_ringing_prob:
+        if self.r.random() < self._vq_or_global(vq, "abandon_while_ringing_prob", ib.abandon_while_ringing_prob):
             agent = self._pick_agent(vq, t_q + wait, premium=premium)
             row = self._base(ctx, arrive, "Inbound", "Agent", role, "abandon_ringing")
             self._route(row, vq, orig_vq)

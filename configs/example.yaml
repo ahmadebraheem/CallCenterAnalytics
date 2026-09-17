@@ -38,8 +38,13 @@ vq_weights:
 
 # Predictive Behavioural Routing: PBR queues route disproportionately to high-scoring agents.
 # Any VQConfig field can be overridden per queue here.
+# Per-queue behaviour knobs (null / omitted = use the global `inbound` / `ivr` values):
+#   short_abandon_prob, abandon_while_ringing_prob, rona_prob, ivr_contained_prob, wait_scale
+# See configs/full_config.yaml for the complete annotated list of every parameter.
 vq_overrides:
-  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5}
+  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5,   # L1: PBR on, impatient callers
+                  patience_median_s: 90, short_abandon_prob: 0.03, rona_prob: 0.04}
+  VQ_Tech_Tier2: {patience_median_s: 400, wait_scale: 1.5, service_level_s: 90} # L2: slow but patient
   VQ_Retention_Cancel: {pbr_skew: 1.2}      # even more concentrated than the default 1.0
 
 inbound:

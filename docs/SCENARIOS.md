@@ -47,6 +47,12 @@ The wait is drawn from the VQ's expected-wait curve for that minute (load driven
 Otherwise the call is answered (`QUEUE_TIME` = wait, `RING_TIME` 2–20 s) and an outcome from §4
 is drawn using the LOB's `outcome_weights`.
 
+All of the probabilities above are global (`inbound.*`, `ivr.contained_prob`) but can be overridden
+per queue with `vqs[].short_abandon_prob`, `abandon_while_ringing_prob`, `rona_prob`,
+`ivr_contained_prob`; `vqs[].wait_scale` multiplies every drawn wait for that queue (a cheap way to
+make one queue – e.g. L2 tech support – consistently slower and more abandon-prone). See
+`configs/full_config.yaml`.
+
 ## 4. Inbound – answered outcomes
 
 Common encoding of the answered agent leg: `RESOURCE_TYPE=Agent`, `RESOURCE_ROLE=Received`

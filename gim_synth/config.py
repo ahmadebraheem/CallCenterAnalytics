@@ -62,6 +62,13 @@ class VQConfig:
     pbr_enabled: bool = False
     pbr_skew: float = 0.8             # log-normal sigma of agent weights; 0 = uniform, 1.2 = extreme
     pbr_premium_boost: float = 1.6    # exponent applied to weights for VIP / Enterprise customers
+    # Per-queue overrides of the global `inbound` behaviour (None = use the global value).
+    short_abandon_prob: Optional[float] = None
+    abandon_while_ringing_prob: Optional[float] = None
+    rona_prob: Optional[float] = None
+    ivr_contained_prob: Optional[float] = None
+    # Multiplier on the drawn queue wait (1.0 = as modelled); >1 makes the queue slower => more abandons.
+    wait_scale: float = 1.0
 
 
 # --------------------------------------------------------------------------- #

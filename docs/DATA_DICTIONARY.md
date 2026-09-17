@@ -38,7 +38,7 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | `TECHNICAL_RESULT` | string | Info Mart technical descriptor: `Completed`, `Abandoned`, `Transferred`, `Conferenced`, `Redirected` (RONA), `Diverted` (voicemail, callback), `Failed` (system error, no answer, busy). |
 | `TECHNICAL_RESULT_REASON` | string | Reason detail, e.g. `AnsweredByAgent`, `AbandonedWhileQueued`, `AbandonedWhileRinging`, `RouteOnNoAnswer`, `BlindTransfer`, `WarmTransfer`, `ExternalTransfer`, `ConferenceInitiated`, `ConferenceJoined`, `ConsultCompleted`, `IVRContained`, `AfterHoursAnnouncement`, `AfterHoursVoicemail`, `NoAnswerVoicemail`, `CallbackAccepted`, `SystemError`, `OutboundConnected`, `AnsweringMachine`, `NoAnswer`, `Busy`, `NoAgentAvailable`, `InternalCall`, `ExternalParty`, `ExternalNoAnswer`. |
 | `DISCONNECT_REASON` | string, nullable | Who released the leg: `Customer`, `Agent`, `System`, `Transfer` (leg ended because it was transferred). Null on RONA legs. |
-| `DISPOSITION` | string, nullable | Agent wrap-up code, LOB specific (Sales: Sale/NoSale/CallbackScheduled/Info/NotInterested; Retention: Saved/Cancelled/Downgraded/OfferDeclined/Info; CustomerService: Resolved/Escalated/FollowUp/Info; TechSupport: Resolved/Escalated/Dispatch/FollowUp/Info; Billing: PaymentTaken/Adjusted/Disputed/Info/Escalated; Collections: PromiseToPay/Paid/Refused/NoContact/Dispute). `Transferred` on legs that were transferred out, `LeftMessage` on answering-machine outbound legs. Null when no agent handled a customer. |
+| `DISPOSITION` | string, nullable | Agent wrap-up code = the primary `BUSINESS_RESULT` of the leg in `interaction_outcome_fact` (LOB specific, see that table: Sales Sale/NoSale/CallbackScheduled/Info/NotInterested; Retention Saved/Cancelled/Downgraded/OfferDeclined/NoChange/PendingDecision; CustomerService Resolved/FollowUp/Escalated/Info/Unresolved; TechSupport Resolved/Escalated/Dispatch/FollowUp/Info/Unresolved; Billing PaymentTaken/Adjusted/Disputed/Info/Escalated; Collections PromiseToPay/Paid/Refused/Dispute/Hardship/NoChange). Legs without an outcome row: `Transferred` on legs that were transferred out, `Assisted` on the joined agent of a conference, `LeftMessage` on answering-machine outbound legs. Null when no agent handled a customer (abandons, IVR, system drops, unanswered outbound). |
 | `CAMPAIGN_NAME` | string, nullable | Dialer campaign for outbound dialer legs. |
 
 ### Timing
@@ -121,6 +121,71 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | `N_AGENT` | int8 | Agent parties on the leg: 0 (queue / IVR / external / dialer drop), 1 (normal), 2 (consult, conference, internal). |
 | `N_CUSTOMER` | int8 | Customer parties on the leg: 1 for customer-facing legs and connected outbound, 0 for consults, internal calls and unconnected outbound attempts. |
 
+## interaction_outcome_fact
+
+Business outcomes recorded by agents on handled customer calls – the "what happened for the
+business" companion of the resource fact (in a real Info Mart this lives in
+`INTERACTION_DESCRIPTOR.BUSINESS_RESULT` / attached user data and in the CRM). One row per outcome;
+every **handled customer leg** (agent connected with a customer: answered inbound, warm-transfer
+received, conference initiator, direct DID, connected outbound / dialer / callback) has exactly
+one primary outcome (`OUTCOME_SEQ`=1) and optionally one `CrossSell` secondary (`OUTCOME_SEQ`=2).
+Legs that were transferred out, consult legs, internal calls, abandons, IVR legs, system drops and
+unconnected outbound attempts have no outcome. Partitioned like the fact (`call_date=`), same
+timestamp conventions. Join on `IRF_ID` (one-to-many) or `ROOT_INTERACTION_ID` (whole call).
+
+### Identity and join keys
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_ID` | int64 | Surrogate key, unique across the run. |
+| `IRF_ID` | int64 | The agent leg the outcome was recorded on (`interaction_resource_fact.IRF_ID`). |
+| `CALL_ID`, `INTERACTION_ID`, `ROOT_INTERACTION_ID`, `CALL_DATE` | | Copied from the leg for convenient joins / partition pruning. |
+| `OUTCOME_SEQ` | int8 | 1 = primary outcome (equals the leg's `DISPOSITION`), 2 = secondary `CrossSell`. |
+
+### Timing
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_TIME` | timestamp | When the outcome happened. Monetary outcomes (order placed, payment taken, save offer accepted, cancellation processed) occur **inside the conversation**, 50–97 % of the way between `ANSWER_TIME` and `END_TIME`; other outcomes are coded at wrap-up (= `RECORDED_TIME`) except a configurable share (`in_call_event_prob`, 35 %) that also falls inside the call. Always ≥ the leg's `ANSWER_TIME`. |
+| `OUTCOME_TIME_UTC` | timestamp (UTC) | Same instant in UTC. |
+| `RECORDED_TIME` | timestamp | When the agent coded the outcome: inside the after-call work window (`END_TIME` … `ACW_END_TIME`), or at `END_TIME` when the leg has no ACW. Always ≥ `OUTCOME_TIME`. |
+| `IN_CALL_FLAG` | int8 | 1 when `OUTCOME_TIME` lies inside the talk (≤ `END_TIME`). |
+
+### Context (denormalised from the leg)
+
+| Column | Type | Description |
+|---|---|---|
+| `CALL_TYPE`, `SCENARIO`, `LOB`, `VQ_NAME`, `CAMPAIGN_NAME`, `ROUTING_METHOD` | | As on the leg. `LOB` is the LOB whose outcome catalogue was used (VQ's LOB, or the agent's LOB for direct / manual outbound). |
+| `AGENT_ID`, `AGENT_NAME`, `AGENT_GROUP`, `AGENT_TENURE_BAND`, `SITE` | | The agent who recorded the outcome (= the leg's agent). |
+| `AGENT_PBR_SCORE` | float32 | The agent's PBR score (percentile 0–1) on **every** row, regardless of routing method – the agent effect on outcomes is driven by the same latent quality, so this is the column to correlate conversion with. |
+| `CUSTOMER_ID`, `CUSTOMER_SEGMENT` | | The customer. |
+| `QUEUE_TIME`, `TALK_TIME`, `HANDLE_TIME` | int32 | Copied from the leg so wait / handle-time effects can be analysed without a join. |
+
+### The outcome
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_CATEGORY` | string | Roll-up: `Sale`, `Retention`, `Churn`, `Service`, `Escalation`, `Billing`, `Collections`, `FollowUp`, `NoChange`. |
+| `BUSINESS_RESULT` | string | The outcome code (LOB catalogue in `lobs[].business_outcomes`). Defaults – **Sales**: `Sale`, `NoSale`, `CallbackScheduled`, `Info`, `NotInterested`; **Retention**: `Saved`, `Cancelled`, `Downgraded`, `OfferDeclined` (kept the plan, refused the offer), `NoChange` (enquiry only), `PendingDecision`; **CustomerService**: `Resolved`, `FollowUp`, `Escalated`, `Info`, `Unresolved`; **TechSupport**: `Resolved`, `Escalated`, `Dispatch`, `FollowUp`, `Info`, `Unresolved`; **Billing**: `PaymentTaken`, `Adjusted`, `Disputed`, `Info`, `Escalated`; **Collections**: `PromiseToPay`, `Paid`, `Refused`, `Dispute`, `Hardship`, `NoChange`; plus `CrossSell` on secondary rows of any LOB. |
+| `OUTCOME_SUBTYPE` | string, nullable | Detail of the outcome: product sold (`Mobile_Postpaid`, `Broadband_Fibre`, `TV_Bundle` …), save offer (`Discount`, `PlanChange`, `FreeMonths` …), cancel reason (`Price`, `Competitor`, `ServiceIssues` …), resolution (`Reset`, `ConfigFix` …), payment method (`Card`, `BankTransfer`), escalation target, cross-sell product (`DeviceInsurance`, `StreamingAddOn` …). Null for outcomes without subtypes. |
+| `OUTCOME_POLARITY` | string | `Positive` (sale, save, resolved, payment, promise, credit), `Neutral` (info, no change, follow-up, downgrade, dispatch), `Negative` (no sale, cancelled, offer declined, escalated, unresolved, dispute, refused). |
+| `OFFER_MADE_FLAG` | int8 | An offer was presented to the customer (probability per outcome, e.g. always on `Sale` / `NoSale` / `OfferDeclined`). |
+| `AMOUNT_TYPE` | string, nullable | `Revenue` (sale / cross-sell value), `MRR_Retained` (monthly revenue saved), `MRR_Lost` (cancelled or downgraded monthly revenue), `Payment` (payment taken), `Credit` (adjustment granted), `Promise` (promise-to-pay amount). Null when the outcome carries no money. |
+| `AMOUNT` | float64, nullable | Positive amount in `CURRENCY`, log-normal per outcome (e.g. Sale median 65, Payment median 120, MRR 85); the direction is given by `AMOUNT_TYPE`. Present iff `AMOUNT_TYPE`. |
+| `CURRENCY` | string, nullable | `USD` by default (`outcomes.currency`). |
+| `FOLLOW_UP_FLAG` | int8 | A case / task was created (scheduled callbacks, pending decisions, escalations, disputes, dispatches, promises to pay, hardship referrals). |
+| `CASE_ID` | string, nullable | Case / ticket id (`CS10000001`…), present iff `FOLLOW_UP_FLAG`. |
+| `FOLLOW_UP_DUE_TIME` | timestamp, nullable | When the follow-up is due: 1–5 days after `RECORDED_TIME` at a business hour (09:00–18:00 local); 3–14 days for promises to pay (the promise date). |
+
+How outcomes are drawn: each LOB has a catalogue of outcomes with baseline weights; per call the
+weights are bent in log-odds space by the **agent's** latent quality (`agent_lift`, e.g. +0.6 for
+`Sale`, −0.5 for `Cancelled`), by the **customer segment** (`segment_lift`, VIP +0.35 on Positive
+outcomes) and by the **wait** the customer endured (`wait_penalty_per_min`, −0.12 per minute
+beyond the first on Positive outcomes). Calls with the `short` handling outcome (4–30 s talk) never
+produce Positive or monetary outcomes. Because PBR queues route disproportionately to
+high-quality agents, PBR-routed Sales/Retention calls convert visibly better than ACD-routed ones,
+and conversion rises monotonically with `AGENT_PBR_SCORE` (see README §6).
+
 ## Dimension tables
 
 ### dim_site
@@ -148,8 +213,9 @@ predicted-outcome quality; drives how often PBR queues pick the agent), `AGENT_D
 ## _manifest.json
 
 `generated_at`, `config` (effective configuration), `roster_size`, `vq_count`, `rows`,
-`interactions`, `elapsed_s`, `dropped_callbacks_after_period`, `call_result_counts`,
-`call_type_counts`, `scenario_counts`, `days[]` (`date`, `label`, `base_volume`, `arrivals`,
-`legs`, `interactions`, `abandon_pct`, `service_level_pct`, `peak_calls_per_min`,
-`min_calls_per_min_daytime`, `events[]` with the bursts / mega bursts / lulls / day events of that
-day), `files[]`.
+`interactions`, `outcome_rows`, `elapsed_s`, `dropped_callbacks_after_period`, `call_result_counts`,
+`call_type_counts`, `scenario_counts`, `business_result_counts` (`LOB:BUSINESS_RESULT` → count),
+`outcome_polarity_counts`, `amount_totals_by_type`, `days[]` (`date`, `label`, `base_volume`,
+`arrivals`, `legs`, `interactions`, `abandon_pct`, `service_level_pct`, `peak_calls_per_min`,
+`min_calls_per_min_daytime`, `outcomes`, `positive_outcome_pct`, `events[]` with the bursts / mega
+bursts / lulls / day events of that day), `files[]`.

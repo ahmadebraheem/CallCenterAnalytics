@@ -14,12 +14,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .config import GeneratorConfig
+from .config import GeneratorConfig, OutcomeDef
 from .refdata import Agent, RefData, VQ
-from .schema import CALL_RESULT_CODES, new_row
+from .schema import CALL_RESULT_CODES, new_outcome_row, new_row
 
 DAY_S = 86400.0
 TRANSFERISH = {"blind_transfer", "warm_transfer", "multi_hop", "external_transfer", "conference", "consult_only"}
+PENDING_OUTCOME = "__outcome__"   # sentinel: DISPOSITION to be set from the business-outcome draw
 
 
 @dataclass
@@ -74,7 +75,15 @@ class LegBuilder:
         self.dropped_callbacks = 0
 
         self.outcomes = {name: _Weighted(l.outcome_weights) for name, l in ref.lobs.items()}
-        self.dispositions = {name: _Weighted(l.dispositions) for name, l in ref.lobs.items()}
+        self.business_outcomes: Dict[str, List[Tuple[str, OutcomeDef]]] = {
+            name: list(l.business_outcomes.items()) for name, l in ref.lobs.items()}
+        self.subtype_pickers: Dict[int, _Weighted] = {
+            id(o): _Weighted(o.subtypes) for l in ref.lobs.values() for o in l.business_outcomes.values() if o.subtypes}
+        if cfg.outcomes.cross_sell.subtypes:
+            self.subtype_pickers[id(cfg.outcomes.cross_sell)] = _Weighted(cfg.outcomes.cross_sell.subtypes)
+        self.outcome_rows: List[dict] = []
+        self.outcome_counter = 0
+        self.case_counter = 0
         self.transfer_targets = {name: _Weighted(l.transfer_targets) for name, l in ref.lobs.items()}
         self.manual_results = _Weighted(cfg.outbound.manual_results)
         self.dialer_results = _Weighted(cfg.outbound.dialer_results)
@@ -97,6 +106,7 @@ class LegBuilder:
         self.day = day
         self.dow = day.weekday()
         self.ew = ew_by_vq
+        self.outcome_rows = []
 
     # ------------------------------------------------------------------ #
     # small helpers
@@ -305,6 +315,87 @@ class LegBuilder:
             row["TRANSFER_TYPE"] = transfer_type
 
     # ------------------------------------------------------------------ #
+    # business outcomes
+    # ------------------------------------------------------------------ #
+    def _outcome_weights(self, defs: Sequence[Tuple[str, OutcomeDef]], agent: Agent, row: dict,
+                         handling: str) -> List[float]:
+        """Baseline weights bent by agent quality, customer segment and the wait the customer endured."""
+        oc = self.cfg.outcomes
+        seg_lift = oc.segment_lift.get(row["CUSTOMER_SEGMENT"] or "", 0.0)
+        wait_pen = oc.wait_penalty_per_min * max(0.0, (row["QUEUE_TIME"] or 0) / 60.0 - 1.0)
+        weights: List[float] = []
+        for _, o in defs:
+            if handling == "short" and (o.polarity == "Positive" or o.amount_type is not None):
+                weights.append(0.0)
+                continue
+            logit = o.agent_lift * oc.agent_effect_scale * agent.pbr_z
+            if o.polarity == "Positive":
+                logit += seg_lift - wait_pen
+            weights.append(o.weight * math.exp(logit))
+        if sum(weights) <= 0:  # every outcome excluded (e.g. LOB with only Positive outcomes) -> baseline
+            weights = [o.weight for _, o in defs]
+        return weights
+
+    def _new_outcome_row(self, row: dict, agent: Agent, name: str, o: OutcomeDef, seq: int) -> dict:
+        oc = self.cfg.outcomes
+        self.outcome_counter += 1
+        out = new_outcome_row()
+        out["OUTCOME_ID"] = self.outcome_counter
+        for k in ("IRF_ID", "CALL_ID", "INTERACTION_ID", "ROOT_INTERACTION_ID", "CALL_DATE", "CALL_TYPE", "SCENARIO",
+                  "LOB", "VQ_NAME", "CAMPAIGN_NAME", "ROUTING_METHOD", "AGENT_ID", "AGENT_NAME", "AGENT_GROUP",
+                  "AGENT_TENURE_BAND", "SITE", "CUSTOMER_ID", "CUSTOMER_SEGMENT", "QUEUE_TIME", "TALK_TIME", "HANDLE_TIME"):
+            out[k] = row[k]
+        out["OUTCOME_SEQ"] = seq
+        out["AGENT_PBR_SCORE"] = round(agent.pbr_score, 4)
+        out["OUTCOME_CATEGORY"], out["BUSINESS_RESULT"], out["OUTCOME_POLARITY"] = o.category, name, o.polarity
+        picker = self.subtype_pickers.get(id(o))
+        out["OUTCOME_SUBTYPE"] = picker.pick(self.r) if picker else None
+        out["OFFER_MADE_FLAG"] = int(self.r.random() < o.offer_prob)
+
+        # when: amount-bearing events (order placed, payment taken) happen inside the conversation;
+        # other outcomes are coded at wrap-up (or in the last seconds of the call when there is no ACW)
+        answer, end, acw_end = row["_answer"], row["_end"], row["_acw_end"]
+        recorded = end + (acw_end - end) * self.r.uniform(0.15, 0.9) if acw_end is not None else end
+        in_call = o.amount_type is not None or self.r.random() < oc.in_call_event_prob
+        outcome_t = answer + (end - answer) * self.r.uniform(0.5, 0.97) if in_call else recorded
+        out["_outcome"], out["_recorded"], out["IN_CALL_FLAG"] = float(round(outcome_t)), float(round(recorded)), int(in_call)
+
+        if o.amount_type is not None:
+            out["AMOUNT_TYPE"] = o.amount_type
+            out["AMOUNT"] = round(self._lognorm(o.amount_median, o.amount_sigma), 2)
+            out["CURRENCY"] = oc.currency
+        if self.r.random() < o.follow_up_prob:
+            self.case_counter += 1
+            out["FOLLOW_UP_FLAG"] = 1
+            out["CASE_ID"] = f"CS{10_000_000 + self.case_counter}"
+            lo, hi = oc.promise_days if o.amount_type == "Promise" else oc.follow_up_days
+            due_day = math.floor(out["_recorded"] / DAY_S) + self.r.uniform(lo, hi)
+            # due at a business hour (09:00-18:00 local) of the target day
+            out["_follow_up"] = float(math.floor(due_day) * DAY_S + 9 * 3600 + self.r.uniform(0, 9 * 3600))
+        return out
+
+    def _outcome(self, row: dict, lob: str, agent: Agent, handling: str) -> None:
+        """Draw the business outcome(s) of a handled customer leg; sets DISPOSITION and records outcome rows."""
+        oc = self.cfg.outcomes
+        defs = self.business_outcomes[lob]
+        weights = self._outcome_weights(defs, agent, row, handling)
+        name, o = self.r.choices(defs, weights=weights)[0]
+        row["DISPOSITION"] = name
+        if not oc.enabled:
+            return
+        primary = self._new_outcome_row(row, agent, name, o, seq=1)
+        self.outcome_rows.append(primary)
+        if o.polarity == "Negative" or handling == "short" or oc.cross_sell_prob <= 0:
+            return
+        xs = oc.cross_sell
+        p = min(0.6, oc.cross_sell_prob * math.exp(xs.agent_lift * oc.agent_effect_scale * agent.pbr_z
+                                                   + oc.segment_lift.get(row["CUSTOMER_SEGMENT"] or "", 0.0)))
+        if self.r.random() < p:
+            secondary = self._new_outcome_row(row, agent, "CrossSell", xs, seq=2)
+            secondary["_recorded"] = max(secondary["_recorded"], primary["_recorded"])
+            self.outcome_rows.append(secondary)
+
+    # ------------------------------------------------------------------ #
     # INBOUND
     # ------------------------------------------------------------------ #
     def inbound(self, t: float, vq_idx: int, cust: int) -> List[dict]:
@@ -459,7 +550,7 @@ class LegBuilder:
         children: List[dict] = []
         disconnect = "Customer" if self.r.random() < 0.65 else "Agent"
         result = ("Answered", "Completed", "AnsweredByAgent")
-        disposition: Optional[str] = self.dispositions[vq.lob].pick(self.r)
+        disposition: Optional[str] = PENDING_OUTCOME
         hold, holds, acw = 0.0, 0, self._acw(vq, agent)
         n_agent = 1
 
@@ -554,9 +645,12 @@ class LegBuilder:
         if "_end" not in row:
             self._finish(row, ivr, queue, ring, True, talk, hold, holds, acw)
         self._result(row, *result, disconnect)
-        row["DISPOSITION"] = disposition
         row["N_AGENT"], row["N_CUSTOMER"] = n_agent, 1
         self._service_level(row, vq)
+        if disposition == PENDING_OUTCOME:
+            self._outcome(row, vq.lob, agent, outcome)
+        else:
+            row["DISPOSITION"] = disposition
         rows.extend(children)
         return rows
 
@@ -614,7 +708,7 @@ class LegBuilder:
             hold, holds = (self._hold(talk_vq), 1) if self.r.random() < 0.25 else (0.0, 0)
             self._finish(row, 0, 0, ring, True, talk, hold, holds, self._acw(talk_vq, agent))
             self._result(row, "Answered", "Completed", "AnsweredByAgent", "Customer" if self.r.random() < 0.65 else "Agent")
-            row["DISPOSITION"] = self.dispositions[agent.lob].pick(self.r)
+            self._outcome(row, agent.lob, agent, "normal")
         else:
             self._finish(row, 0, 0, ring * self.r.uniform(1.0, 2.5), False)
             self._result(row, "Abandoned", "Abandoned", "AbandonedWhileRinging", "Customer")
@@ -654,9 +748,9 @@ class LegBuilder:
         hold, holds = (self._hold(vq), 1) if self.r.random() < vq.cfg.hold_prob * 0.6 else (0.0, 0)
         self._finish(row, 0, 0, 0, True, talk, hold, holds, self._acw(vq, agent))
         self._result(row, "Answered", "Completed", "AnsweredByAgent", "Customer" if self.r.random() < 0.65 else "Agent")
-        row["DISPOSITION"] = self.dispositions[vq.lob].pick(self.r)
         row["N_AGENT"], row["N_CUSTOMER"] = 1, 1
         row["SERVICE_LEVEL_FLAG"] = None
+        self._outcome(row, vq.lob, agent, "normal")
         return row
 
     def _conference_leg(self, ctx: Ctx, t: float, dur: float, agent: Agent, vq: VQ, from_vq: VQ) -> dict:
@@ -667,7 +761,7 @@ class LegBuilder:
         self._finish(row, 0, 0, 0, True, dur, 0, 0, self._acw(vq, agent, 0.5))
         self._result(row, "Answered", "Conferenced", "ConferenceJoined", "Agent")
         row["CONFERENCE_FLAG"] = 1
-        row["DISPOSITION"] = self.dispositions[vq.lob].pick(self.r)
+        row["DISPOSITION"] = "Assisted"   # the business outcome is recorded by the conference initiator
         row["N_AGENT"], row["N_CUSTOMER"] = 2, 1
         return row
 
@@ -689,11 +783,11 @@ class LegBuilder:
     # ------------------------------------------------------------------ #
     # OUTBOUND / INTERNAL / DIRECT / CALLBACK
     # ------------------------------------------------------------------ #
-    def _outbound_result(self, row: dict, result: str, ring: float, talk: float, acw: float, vq: VQ) -> None:
+    def _outbound_result(self, row: dict, result: str, ring: float, talk: float, acw: float) -> None:
+        """Timing + result of an outbound attempt; the caller draws the business outcome for Answered legs."""
         if result == "Answered":
             self._finish(row, 0, 0, ring, True, talk, 0, 0, acw)
             self._result(row, "Answered", "Completed", "OutboundConnected", "Customer" if self.r.random() < 0.5 else "Agent")
-            row["DISPOSITION"] = self.dispositions[vq.lob].pick(self.r)
             row["N_CUSTOMER"] = 1
         elif result == "AnsweringMachine":
             self._finish(row, 0, 0, ring, True, self.r.uniform(10, 45), 0, 0, min(acw, 30))
@@ -718,8 +812,10 @@ class LegBuilder:
         row["DNIS"] = self.ref.customer_ani[cust]
         row["ANI"] = next((s.outbound_cli for s in self.cfg.sites if s.name == agent.site), None)
         result = self.manual_results.pick(self.r)
-        self._outbound_result(row, result, self.r.uniform(4, 25), self._talk(vq, agent, 0.7), self._acw(vq, agent), vq)
+        self._outbound_result(row, result, self.r.uniform(4, 25), self._talk(vq, agent, 0.7), self._acw(vq, agent))
         row["N_AGENT"] = 1
+        if result == "Answered":
+            self._outcome(row, agent.lob, agent, "normal")
         return [row]
 
     def outbound_dialer(self, t: float, cust: int) -> List[dict]:
@@ -743,7 +839,8 @@ class LegBuilder:
         row["ROUTING_METHOD"] = "Dialer"
         row["DNIS"] = self.ref.customer_ani[cust]
         row["ANI"] = next((s.outbound_cli for s in self.cfg.sites if s.name == agent.site), None)
-        self._outbound_result(row, result, self.r.uniform(3, 20), self._talk(vq, agent, 0.75), self._acw(vq, agent), vq)
+        self._outbound_result(row, result, self.r.uniform(3, 20), self._talk(vq, agent, 0.75), self._acw(vq, agent))
+        row["N_AGENT"] = 1
         if result == "Answered":
             row["QUEUE_TIME"] = int(round(self.r.uniform(1, 8)))   # dialer-to-agent transfer delay
             row["DURATION"] += row["QUEUE_TIME"]
@@ -751,7 +848,7 @@ class LegBuilder:
             row["_end"] += row["QUEUE_TIME"]
             if row["_acw_end"] is not None:
                 row["_acw_end"] += row["QUEUE_TIME"]
-        row["N_AGENT"] = 1
+            self._outcome(row, lob, agent, "normal")
         return [row]
 
     def internal(self, t: float) -> List[dict]:
@@ -793,7 +890,7 @@ class LegBuilder:
             hold, holds = (self._hold(vq), 1) if self.r.random() < 0.2 else (0.0, 0)
             self._finish(row, 0, 0, ring, True, talk, hold, holds, self._acw(vq, agent))
             self._result(row, "Answered", "Completed", "AnsweredByAgent", "Customer" if self.r.random() < 0.65 else "Agent")
-            row["DISPOSITION"] = self.dispositions[agent.lob].pick(self.r)
+            self._outcome(row, agent.lob, agent, "normal")
         else:
             vm = self.r.uniform(0, 75)
             self._finish(row, vm, 0, 25, False)
@@ -816,8 +913,10 @@ class LegBuilder:
         u = self.r.random()
         ib = self.cfg.inbound
         result = "Answered" if u < ib.callback_connect_prob else ("NoAnswer" if u < ib.callback_connect_prob + ib.callback_no_answer_prob else "Busy")
-        self._outbound_result(row, result, self.r.uniform(4, 25), self._talk(vq, agent), self._acw(vq, agent), vq)
+        self._outbound_result(row, result, self.r.uniform(4, 25), self._talk(vq, agent), self._acw(vq, agent))
         row["N_AGENT"] = 1
+        if result == "Answered":
+            self._outcome(row, vq.lob, agent, "normal")
         return [row]
 
     # ------------------------------------------------------------------ #

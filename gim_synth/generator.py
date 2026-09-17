@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -16,8 +16,8 @@ from .arrivals import MINUTES, arrival_seconds, build_day_profile, expected_wait
 from .config import GeneratorConfig, config_to_dict
 from .refdata import RefData, build_refdata, vq_probabilities_by_hour
 from .scenarios import LegBuilder
-from .validate import ValidationError, validate_table
-from .writer import ParquetWriter, rows_to_table
+from .validate import ValidationError, validate_outcomes, validate_table
+from .writer import OUTCOME_TABLE, ParquetWriter, outcome_rows_to_table, rows_to_table
 
 TYPE_LABELS = ["inbound", "outbound_manual", "outbound_dialer", "internal", "direct_did"]
 
@@ -39,8 +39,9 @@ class Generator:
         self.start = date.fromisoformat(cfg.start_date)
         self.service_levels = {v.name: v.cfg.service_level_s for v in self.ref.vqs}
         self.stats: Dict[str, object] = {
-            "rows": 0, "interactions": 0, "days": [], "call_result": Counter(), "call_type": Counter(),
-            "scenario": Counter(), "validation_failures": [],
+            "rows": 0, "interactions": 0, "outcome_rows": 0, "days": [], "call_result": Counter(),
+            "call_type": Counter(), "scenario": Counter(), "business_result": Counter(),
+            "outcome_polarity": Counter(), "amount_by_type": Counter(), "validation_failures": [],
         }
 
     # ------------------------------------------------------------------ #
@@ -58,32 +59,39 @@ class Generator:
         try:
             for d in range(cfg.days):
                 day = self.start + timedelta(days=d)
-                rows = self._generate_day(d, day)
+                rows, outcome_rows = self._generate_day(d, day)
                 table = rows_to_table(rows, day, self.tz)
+                outcomes = outcome_rows_to_table(outcome_rows, day, self.tz) if cfg.outcomes.enabled else None
                 if out.validate:
                     failures = validate_table(table, cfg, self.service_levels)
+                    if outcomes is not None:
+                        failures += validate_outcomes(outcomes, table)
                     if failures:
                         self.stats["validation_failures"].append({"day": day.isoformat(), "failures": failures})
                         raise ValidationError(f"{day}: " + "; ".join(failures))
                 writer.write_day(table, day)
-                self._collect_stats(day, rows)
+                if outcomes is not None:
+                    writer.write_day(outcomes, day, OUTCOME_TABLE)
+                self._collect_stats(day, rows, outcome_rows)
                 self.log(f"{day} {self.stats['days'][-1]['label']:<10} legs={len(rows):>7,} "
                          f"interactions={self.stats['days'][-1]['interactions']:>7,} "
                          f"abandon%={self.stats['days'][-1]['abandon_pct']:5.1f} "
                          f"SL%={self.stats['days'][-1]['service_level_pct']:5.1f} "
                          f"peak/min={self.stats['days'][-1]['peak_calls_per_min']:>5} "
+                         f"outcomes={len(outcome_rows):>6,} "
                          f"({time.time() - t0:6.1f}s)")
         finally:
             writer.close()
         self.stats["rows"] = int(sum(d["legs"] for d in self.stats["days"]))
         self.stats["interactions"] = int(sum(d["interactions"] for d in self.stats["days"]))
+        self.stats["outcome_rows"] = int(sum(d["outcomes"] for d in self.stats["days"]))
         self.stats["dropped_callbacks_after_period"] = len(self.builder.pending_callbacks)
         self.stats["elapsed_s"] = round(time.time() - t0, 1)
         self._write_manifest(writer)
         return self.stats
 
     # ------------------------------------------------------------------ #
-    def _generate_day(self, day_index: int, day: date) -> List[dict]:
+    def _generate_day(self, day_index: int, day: date) -> Tuple[List[dict], List[dict]]:
         cfg, ref, b = self.cfg, self.ref, self.builder
         dow = day.weekday()
         profile = build_day_profile(cfg, day, self.nprng)
@@ -139,11 +147,13 @@ class Generator:
             rows.extend(b.callback(t, pc))
 
         rows.sort(key=lambda r: (r["_arrive"], r["ROOT_INTERACTION_ID"], r["SEGMENT_SEQ"]))
+        outcome_rows = b.outcome_rows
+        outcome_rows.sort(key=lambda r: (r["_recorded"], r["IRF_ID"], r["OUTCOME_SEQ"]))
         self._last_profile = profile
-        return rows
+        return rows, outcome_rows
 
     # ------------------------------------------------------------------ #
-    def _collect_stats(self, day: date, rows: List[dict]) -> None:
+    def _collect_stats(self, day: date, rows: List[dict], outcome_rows: List[dict]) -> None:
         p = self._last_profile
         results = Counter(r["CALL_RESULT"] for r in rows)
         types = Counter(r["CALL_TYPE"] for r in rows)
@@ -151,6 +161,12 @@ class Generator:
         self.stats["call_result"].update(results)
         self.stats["call_type"].update(types)
         self.stats["scenario"].update(scen)
+        self.stats["business_result"].update(f"{o['LOB']}:{o['BUSINESS_RESULT']}" for o in outcome_rows)
+        self.stats["outcome_polarity"].update(o["OUTCOME_POLARITY"] for o in outcome_rows)
+        for o in outcome_rows:
+            if o["AMOUNT"] is not None:
+                self.stats["amount_by_type"][o["AMOUNT_TYPE"]] += o["AMOUNT"]
+        positive = sum(1 for o in outcome_rows if o["OUTCOME_POLARITY"] == "Positive")
         queued = [r for r in rows if r["RESOURCE_TYPE"] in ("Queue", "Agent") and r["CALL_TYPE"] == "Inbound"
                   and r["VQ_NAME"] is not None and r["RESOURCE_ROLE"] in ("Received", "ReceivedTransfer")]
         offered = len(queued)
@@ -169,6 +185,8 @@ class Generator:
             "service_level_pct": round(100.0 * sl_met / len(sl_rows), 2) if sl_rows else 0.0,
             "peak_calls_per_min": int(p.minute_counts.max()),
             "min_calls_per_min_daytime": int(p.minute_counts[8 * 60:20 * 60].min()),
+            "outcomes": len(outcome_rows),
+            "positive_outcome_pct": round(100.0 * positive / len(outcome_rows), 2) if outcome_rows else 0.0,
             "events": p.events,
         })
 
@@ -180,11 +198,15 @@ class Generator:
             "vq_count": len(self.ref.vqs),
             "rows": self.stats["rows"],
             "interactions": self.stats["interactions"],
+            "outcome_rows": self.stats["outcome_rows"],
             "elapsed_s": self.stats["elapsed_s"],
             "dropped_callbacks_after_period": self.stats["dropped_callbacks_after_period"],
             "call_result_counts": dict(self.stats["call_result"]),
             "call_type_counts": dict(self.stats["call_type"]),
             "scenario_counts": dict(self.stats["scenario"]),
+            "business_result_counts": dict(self.stats["business_result"]),
+            "outcome_polarity_counts": dict(self.stats["outcome_polarity"]),
+            "amount_totals_by_type": {k: round(v, 2) for k, v in self.stats["amount_by_type"].items()},
             "days": self.stats["days"],
             "files": writer.files,
         }

@@ -66,6 +66,9 @@ python -m gim_synth summarize --out ./out
 # data dictionary of all 7 tables (markdown; --format csv, --table dim_vq to narrow)
 python -m gim_synth dictionary
 
+# which LOBs / queues a config resolves to (default, manual or auto catalogue mode)
+python -m gim_synth catalogue --config configs/catalogue_auto.yaml
+
 python -m pytest -q                       # tests
 ```
 
@@ -332,6 +335,7 @@ error.
 | `customers` | pool size, repeat-caller skew, segment mix |
 | `outcomes` | business-outcome effects: `agent_effect_scale`, `wait_penalty_per_min`, `segment_lift`, cross-sell probability and definition, in-call event share, follow-up / promise due windows, currency, `enabled` |
 | `output` | directory, compression, partitioning, dimensions, validation |
+| `catalogue` | how the LOB / VQ catalogue comes about: `mode: default` (built-in 18 queues), `manual` (you list the queues, `auto` fills the rest) or `auto` (you give `n_vqs` + LOBs, the generator designs the catalogue) – see 5.1 |
 | `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per LOB: `business_outcomes` (outcome catalogue with weight, polarity, category, `agent_lift`, offer / follow-up probabilities, amount type and distribution, subtypes), `outcome_weights` (call-handling path), `transfer_targets`; per VQ: hours, AHT, holds, ACW, base ASA, patience, SL threshold, overflow, `pbr_enabled` / `pbr_skew` / `pbr_premium_boost`, and optional per-queue overrides `short_abandon_prob`, `abandon_while_ringing_prob`, `rona_prob`, `ivr_contained_prob`, `wait_scale` |
 | `vq_weights` | shortcut `{VQ name: relative weight}` to reshape the volume split without re-declaring `vqs` |
 | `vq_overrides` | shortcut `{VQ name: {field: value}}` to change any per-VQ field (e.g. `pbr_enabled`, hours, AHT) without re-declaring `vqs` |
@@ -380,6 +384,47 @@ output: {partition_by_day: false, validate: false, compression: gzip}
 Changing `days` is all that is needed to go beyond a month; callbacks that fall after the last
 generated day are dropped (count reported in the manifest). Memory is flat because one day is
 generated, validated and written at a time; runtime is roughly 1.2 s per 30k-call day.
+
+### 5.1 Your own queues: `catalogue.mode`
+
+The default catalogue (6 LOBs, 18 VQs) is hand-designed. To model a different centre you do
+not have to copy 150 lines of `vqs:`; pick a mode (`gim_synth/catalogue.py`):
+
+| mode | you write | the generator fills in |
+|---|---|---|
+| `default` | nothing (optionally `vq_weights` / `vq_overrides`) | – |
+| `manual` | `vqs:` with at least `{name, lob}` per queue; any other field may be omitted or set to `auto`; `lobs:` optional | hours, AHT / hold / ACW / ASA / patience / SL from the LOB template, skill, PBR flag, `weight: auto` (Zipf share of `manual.auto_weight_share`), `overflow_vq: auto` (biggest other queue of the LOB), home site, LOB outcome catalogue / handling mix / transfer map |
+| `auto` | `catalogue.auto`: `n_vqs`, `lobs`, optional `lob_shares`, `volume_skew`, `pbr_share`, `always_open_share`, `weekday_only_share`, `overflow_share`, `aht_spread`, `name_pattern` | everything: names (`VQ_Sales_New`, `VQ_Tech_Tier1` …, deterministic), unbalanced volume split (Zipf within each LOB), 24x7 / business-hours / weekday-only queues, PBR on the biggest Sales / Retention queues, overflow paths to LOB leaders, sites, longer AHT on niche queues, outcome catalogues, transfer maps |
+
+Library LOBs (`Sales`, `Retention`, `CustomerService`, `TechSupport`, `Billing`, `Collections`)
+bring realistic behaviour; any other LOB name (`Complaints`, `Fraud`, `HelpDesk` …) works and
+gets the CustomerService behaviour until you give it its own `business_outcomes`. Whatever mode
+you use, `vq_weights` / `vq_overrides` still apply afterwards, and
+
+```bash
+python -m gim_synth catalogue --config my.yaml     # table of the resolved queues: share, calls/day,
+                                                   # hours, routing, AHT, overflow, site + LOB summary
+```
+
+shows exactly what will be generated. Complete, commented examples:
+[`configs/catalogue_manual.yaml`](configs/catalogue_manual.yaml) and
+[`configs/catalogue_auto.yaml`](configs/catalogue_auto.yaml); the `catalogue:` block of
+`full_config.yaml` documents every field and what `auto` resolves to.
+
+```yaml
+# manual: three queues, mostly auto
+catalogue: {mode: manual}
+vqs:
+  - {name: VQ_Sales_Main, lob: Sales, weight: 0.6, pbr_enabled: true}
+  - {name: VQ_Sales_Web,  lob: Sales, weight: auto, overflow_vq: auto}
+  - {name: VQ_Help,       lob: HelpDesk, weight: 0.3, open_hour: 9, close_hour: 17, days: Mon-Fri}
+
+# auto: 40 queues over four LOBs, Sales-heavy
+catalogue:
+  mode: auto
+  auto: {n_vqs: 40, lobs: [Sales, Retention, CustomerService, Billing],
+         lob_shares: {Sales: 0.5}, volume_skew: 1.5, pbr_share: 0.4}
+```
 
 ---
 

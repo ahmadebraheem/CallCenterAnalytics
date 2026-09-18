@@ -49,6 +49,27 @@ def _cmd_print_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_catalogue(args: argparse.Namespace) -> int:
+    """Show the resolved LOB / VQ catalogue (what default | manual | auto mode produced)."""
+    from .catalogue import describe_catalogue
+
+    cfg = load_config(args.config) if args.config else default_config()
+    rows = describe_catalogue(cfg)
+    print(f"catalogue.mode = {cfg.catalogue.mode}: {len(cfg.lobs)} LOBs, {len(cfg.vqs)} VQs, "
+          f"~{int(cfg.calls_per_day * cfg.mix.inbound)} inbound calls on a factor-1.0 weekday\n")
+    cols = list(rows[0].keys())
+    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in cols}
+    print("  ".join(c.ljust(widths[c]) for c in cols))
+    for r in rows:
+        print("  ".join(str(r[c]).ljust(widths[c]) for c in cols))
+    print("\nLOBs:")
+    for l in cfg.lobs:
+        n = sum(1 for v in cfg.vqs if v.lob == l.name)
+        print(f"  {l.name} ({l.short}): {n} VQ(s), outcomes {list(l.business_outcomes)}, "
+              f"transfers to {list(l.transfer_targets)}")
+    return 0
+
+
 def _cmd_dictionary(args: argparse.Namespace) -> int:
     from .dictionary import build_dictionary, dictionary_csv, dictionary_markdown
     from .refdata import build_refdata
@@ -216,6 +237,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("summarize", help="print quick statistics of a generated dataset")
     s.add_argument("--out", default="./out")
     s.set_defaults(func=_cmd_summarize)
+
+    c = sub.add_parser("catalogue", help="show the resolved LOB / VQ catalogue of a config (default, manual or auto mode)")
+    c.add_argument("--config", help="YAML file; omit for the built-in catalogue")
+    c.set_defaults(func=_cmd_catalogue)
 
     d = sub.add_parser("dictionary", help="print the data dictionary of all output tables")
     d.add_argument("--config", help="YAML file (the dictionary is schema-driven; the config only affects dimension contents)")

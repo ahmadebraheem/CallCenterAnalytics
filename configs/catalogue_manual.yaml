@@ -1,0 +1,63 @@
+# =====================================================================================
+#  catalogue.mode: manual  -  "these are MY queues, fill in whatever I did not specify"
+#
+#      python -m gim_synth catalogue --config configs/catalogue_manual.yaml   # inspect the result
+#      python -m gim_synth generate  --config configs/catalogue_manual.yaml
+#
+#  Minimum per queue: {name, lob}. Everything else may be left out or set to `auto`
+#  (see the `catalogue:` block in full_config.yaml for what `auto` resolves to per field).
+#  Explicit values always win; `auto` weights share `catalogue.manual.auto_weight_share`
+#  of the traffic among themselves.
+# =====================================================================================
+days: 7
+calls_per_day: 20000
+
+catalogue:
+  mode: manual
+  manual:
+    auto_weight_share: 0.25   # the `weight: auto` queues below get 25 % of inbound between them
+    volume_skew: 1.0          # split 1 : 1/2 : 1/3 ... in listing order
+
+# --- the queues --------------------------------------------------------------------
+vqs:
+  # fully specified: nothing is filled in
+  - {name: VQ_Sales_Inbound, lob: Sales, weight: 0.40, skill: SK_Sales,
+     open_hour: 8, close_hour: 21, days: Mon-Sun,
+     talk_median_s: 300, hold_prob: 0.25, acw_mean_s: 40, service_level_s: 20,
+     pbr_enabled: true, pbr_skew: 0.9, overflow_vq: VQ_Sales_Overflow, home_site: Dallas}
+
+  # partially specified: hours given, AHT / patience / SL / site / skill come from the Sales template
+  - {name: VQ_Sales_Business, lob: Sales, weight: 0.10, open_hour: 8, close_hour: 18, days: Mon-Fri}
+
+  # minimal: everything else auto (Sales template for AHT / hours / SL, skill SK_SAL_Overflow, site)
+  - {name: VQ_Sales_Overflow, lob: Sales, weight: 0.02, pbr_enabled: false}
+
+  # a LOB the library knows: TechSupport template (long AHT, 45 % holds, SL 30 s)
+  - {name: VQ_Tech_L1, lob: TechSupport, weight: 0.30, open_hour: 0, close_hour: 24}
+  - {name: VQ_Tech_L2, lob: TechSupport, weight: 0.05, overflow_vq: null,
+     talk_median_s: 780, hold_prob: 0.55, service_level_s: 60, rona_prob: 0.05}
+
+  # a LOB the library does NOT know: generic behaviour (08-20 hours, CustomerService AHT profile).
+  # Both weights are `auto`: together they get auto_weight_share (25 %), split 2:1 in listing order.
+  - {name: VQ_Complaints, lob: Complaints, weight: auto, open_hour: 9, close_hour: 17, days: Mon-Fri}
+  - {name: VQ_Complaints_Exec, lob: Complaints, weight: auto, overflow_vq: auto}
+
+# --- the LOBs (optional) -----------------------------------------------------------
+# Sales and TechSupport are created automatically from the queues above with their library
+# behaviour. Complaints would be too, but here we give it its own outcomes; anything not listed
+# (short, outcome_weights, transfer_targets) is still filled in.
+lobs:
+  - name: Complaints
+    short: CMP
+    business_outcomes:
+      Resolved:     {weight: 0.45, polarity: Positive, category: Service, agent_lift: 0.5, follow_up_prob: 0.1}
+      Compensated:  {weight: 0.15, polarity: Positive, category: Billing, agent_lift: 0.2,
+                     amount_type: Credit, amount_median: 30.0, amount_sigma: 0.6}
+      Escalated:    {weight: 0.15, polarity: Negative, category: Escalation, agent_lift: -0.4, follow_up_prob: 1.0}
+      Ombudsman:    {weight: 0.05, polarity: Negative, category: Escalation, agent_lift: -0.3, follow_up_prob: 1.0}
+      NoChange:     {weight: 0.20, polarity: Neutral,  category: NoChange}
+    transfer_targets: auto      # 40 % to the other Complaints queue, 60 % to VQ_Sales_Inbound / VQ_Tech_L1
+
+# Shortcuts still work on your own queue names.
+vq_overrides:
+  VQ_Tech_L1: {short_abandon_prob: 0.08}

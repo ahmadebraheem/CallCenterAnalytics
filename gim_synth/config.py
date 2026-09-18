@@ -212,6 +212,46 @@ class OutboundConfig:
 
 
 @dataclass
+class AutoCatalogueConfig:
+    """`catalogue.mode: auto` - the generator designs the queue catalogue from these few numbers."""
+    n_vqs: int = 18                   # total number of virtual queues (>= number of LOBs)
+    # LOBs to create. Known library LOBs (Sales, Retention, CustomerService, TechSupport, Billing,
+    # Collections) bring their own outcome catalogue, handling mix, AHT profile and queue names;
+    # unknown names get the generic (CustomerService-like) behaviour.
+    lobs: List[str] = field(default_factory=lambda: [
+        "CustomerService", "Sales", "TechSupport", "Billing", "Retention", "Collections"])
+    lob_shares: Dict[str, float] = field(default_factory=dict)  # inbound share per LOB (relative); missing = library share
+    volume_skew: float = 1.3          # Zipf exponent of the volume split inside a LOB: 0 = equal, 1.3 = monster + long tail
+    pbr_share: float = 0.33           # fraction of VQs with PBR enabled (Sales / Retention queues first)
+    always_open_share: float = 0.15   # fraction of VQs open 24x7 (largest CustomerService / TechSupport queues first)
+    weekday_only_share: float = 0.15  # fraction of VQs open Mon-Fri 08-20 only (smallest queues first)
+    overflow_share: float = 0.6       # fraction of non-leader VQs that overflow to the biggest VQ of their LOB
+    aht_spread: float = 0.15          # niche queues talk longer: talk median x (1 + aht_spread x rank within LOB)
+    name_pattern: str = "VQ_{abbrev}_{suffix}"  # {lob} {abbrev} {short} {suffix} {n} are available
+
+
+@dataclass
+class ManualCatalogueConfig:
+    """`catalogue.mode: manual` - how fields left out (or set to `auto`) in your `vqs:` list are filled."""
+    auto_weight_share: float = 0.2    # total inbound share given to VQs whose weight is `auto` when others are explicit
+    volume_skew: float = 1.3          # Zipf exponent used to split volume among `auto`-weight VQs (listing order)
+
+
+@dataclass
+class CatalogueConfig:
+    # default : the built-in 6 LOB / 18 VQ catalogue (the `lobs:` / `vqs:` lists)
+    # manual  : you list the VQs you want under `vqs:` (name + lob is enough; anything else may be
+    #           left out or set to `auto`); `lobs:` is optional and derived from the VQs
+    # auto    : you only say how many VQs / which LOBs (`catalogue.auto`), the generator does the rest
+    mode: str = "default"
+    auto: AutoCatalogueConfig = field(default_factory=AutoCatalogueConfig)
+    manual: ManualCatalogueConfig = field(default_factory=ManualCatalogueConfig)
+
+
+CATALOGUE_MODES = ("default", "manual", "auto")
+
+
+@dataclass
 class CustomerConfig:
     pool_size: int = 400_000
     skew_power: float = 2.5           # higher => more repeat callers
@@ -470,6 +510,8 @@ class GeneratorConfig:
     outcomes: OutcomesConfig = field(default_factory=OutcomesConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
+    # How the LOB / VQ catalogue below comes about (default | manual | auto); see catalogue.py.
+    catalogue: CatalogueConfig = field(default_factory=CatalogueConfig)
     sites: List[SiteConfig] = field(default_factory=_default_sites)
     lobs: List[LOBConfig] = field(default_factory=_default_lobs)
     vqs: List[VQConfig] = field(default_factory=_default_vqs)
@@ -534,6 +576,24 @@ class GeneratorConfig:
         for camp, lob in self.outbound.campaigns.items():
             if lob not in lob_names:
                 raise ValueError(f"Campaign {camp} references unknown LOB {lob}")
+        if len(vq_names) != len(self.vqs):
+            raise ValueError("VQ names must be unique")
+        if len(lob_names) != len(self.lobs):
+            raise ValueError("LOB names must be unique")
+        cat = self.catalogue
+        if cat.mode not in CATALOGUE_MODES:
+            raise ValueError(f"catalogue.mode must be one of {CATALOGUE_MODES}")
+        if cat.auto.n_vqs < 1:
+            raise ValueError("catalogue.auto.n_vqs must be >= 1")
+        if not cat.auto.lobs:
+            raise ValueError("catalogue.auto.lobs must list at least one LOB")
+        for key in ("pbr_share", "always_open_share", "weekday_only_share", "overflow_share"):
+            if not (0 <= getattr(cat.auto, key) <= 1):
+                raise ValueError(f"catalogue.auto.{key} must be within [0, 1]")
+        if cat.auto.volume_skew < 0 or cat.manual.volume_skew < 0:
+            raise ValueError("catalogue volume_skew must be >= 0")
+        if not (0 <= cat.manual.auto_weight_share < 1):
+            raise ValueError("catalogue.manual.auto_weight_share must be within [0, 1)")
         if self.days < 1:
             raise ValueError("days must be >= 1")
         if self.calls_per_day < 1:
@@ -611,14 +671,26 @@ def config_to_dict(cfg: GeneratorConfig) -> Dict[str, Any]:
 
 
 def load_config(path: Optional[str] = None, overrides: Optional[Dict[str, Any]] = None) -> GeneratorConfig:
-    """Load defaults, apply a YAML file (optional) and then CLI overrides (optional)."""
-    data = config_to_dict(default_config())
+    """Load defaults, apply a YAML file (optional) and then CLI overrides (optional).
+
+    With `catalogue.mode: manual|auto` the built-in `lobs` / `vqs` lists are dropped before merging
+    and the catalogue is resolved from the user's (possibly partial) lists or from `catalogue.auto`.
+    """
+    from .catalogue import resolve_catalogue
+
+    user: Dict[str, Any] = {}
     if path:
         with open(path, "r", encoding="utf-8") as fh:
-            file_data = yaml.safe_load(fh) or {}
-        data = _deep_merge(data, file_data)
+            user = yaml.safe_load(fh) or {}
     if overrides:
-        data = _deep_merge(data, {k: v for k, v in overrides.items() if v is not None})
+        user = _deep_merge(user, {k: v for k, v in overrides.items() if v is not None})
+    data = config_to_dict(default_config())
+    mode = (user.get("catalogue") or {}).get("mode", "default")
+    if mode in ("manual", "auto"):
+        data.pop("lobs")
+        data.pop("vqs")
+    data = _deep_merge(data, user)
+    data = resolve_catalogue(data)
     cfg = _build(GeneratorConfig, data)
     cfg.validate()
     return cfg

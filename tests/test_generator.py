@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import pyarrow as pa
@@ -7,7 +8,7 @@ import pyarrow.dataset as ds
 import pytest
 
 from gim_synth.arrivals import build_day_profile, expected_wait_curve
-from gim_synth.config import default_config, load_config
+from gim_synth.config import config_to_dict, default_config, load_config
 from gim_synth.generator import generate
 from gim_synth.refdata import build_refdata
 from gim_synth.schema import COLUMNS, OUTCOME_COLUMNS
@@ -247,6 +248,95 @@ def test_full_config_yaml_matches_defaults():
             assert math.isclose(a[k], b[k]), k
         else:
             assert a[k] == b[k], k
+
+
+def test_catalogue_manual_fills_auto_fields():
+    cfg = load_config(overrides={
+        "catalogue": {"mode": "manual", "manual": {"auto_weight_share": 0.25, "volume_skew": 1.0}},
+        "vqs": [
+            {"name": "VQ_Sales_Main", "lob": "Sales", "weight": 0.6, "pbr_enabled": True},
+            {"name": "VQ_Sales_Web", "lob": "Sales", "weight": "auto", "overflow_vq": "auto"},
+            {"name": "VQ_Help", "lob": "HelpDesk", "weight": 0.15, "open_hour": 9, "close_hour": 17, "days": "Mon-Fri"},
+            {"name": "VQ_Help_VIP", "lob": "HelpDesk", "weight": "auto"},
+        ],
+        "lobs": [{"name": "HelpDesk", "short": "HLP"}],
+    })
+    by = {v.name: v for v in cfg.vqs}
+    assert set(by) == {"VQ_Sales_Main", "VQ_Sales_Web", "VQ_Help", "VQ_Help_VIP"}
+    assert {l.name for l in cfg.lobs} == {"Sales", "HelpDesk"}          # Sales added from the VQs
+    # auto weights: 25 % of total between the two, split 1 : 1/2 in listing order
+    total = sum(v.weight for v in cfg.vqs)
+    assert math.isclose((by["VQ_Sales_Web"].weight + by["VQ_Help_VIP"].weight) / total, 0.25, rel_tol=1e-6)
+    assert math.isclose(by["VQ_Sales_Web"].weight / by["VQ_Help_VIP"].weight, 2.0, rel_tol=1e-4)
+    # template values from the Sales library queue; explicit values kept
+    assert (by["VQ_Sales_Web"].open_hour, by["VQ_Sales_Web"].close_hour) == (8, 21)
+    assert by["VQ_Sales_Web"].talk_median_s == 330 and by["VQ_Sales_Web"].pbr_enabled is True
+    assert by["VQ_Sales_Web"].overflow_vq == "VQ_Sales_Main" and by["VQ_Sales_Main"].overflow_vq is None
+    assert (by["VQ_Help"].open_hour, by["VQ_Help"].close_hour, by["VQ_Help"].days) == (9, 17, "Mon-Fri")
+    assert (by["VQ_Help_VIP"].open_hour, by["VQ_Help_VIP"].close_hour) == (8, 20)   # generic hours
+    assert by["VQ_Help_VIP"].skill == "SK_HLP_VIP" and by["VQ_Help_VIP"].home_site in {s.name for s in cfg.sites}
+    help_lob = next(l for l in cfg.lobs if l.name == "HelpDesk")
+    assert help_lob.short == "HLP" and set(help_lob.business_outcomes) == {"Resolved", "FollowUp", "Escalated", "Info", "Unresolved"}
+    assert set(help_lob.transfer_targets) == {"VQ_Help_VIP", "VQ_Sales_Main"}
+    assert set(cfg.outbound.campaigns.values()) <= {"Sales", "HelpDesk"}     # built-in campaigns for absent LOBs dropped
+    assert "Sales" in cfg.outbound.campaigns.values()
+    with pytest.raises(ValueError, match="no `vqs:`"):
+        load_config(overrides={"catalogue": {"mode": "manual"}})
+    with pytest.raises(ValueError, match="unknown fields"):
+        load_config(overrides={"catalogue": {"mode": "manual"}, "vqs": [{"name": "X", "lob": "Sales", "talk": 3}]})
+
+
+def test_catalogue_auto_designs_unbalanced_catalogue():
+    cfg = load_config(overrides={"catalogue": {"mode": "auto", "auto": {
+        "n_vqs": 12, "lobs": ["Sales", "TechSupport", "Fraud"], "lob_shares": {"Fraud": 0.1},
+        "pbr_share": 0.25, "always_open_share": 0.25, "weekday_only_share": 0.25, "overflow_share": 1.0}}})
+    assert len(cfg.vqs) == 12 and {l.name for l in cfg.lobs} == {"Sales", "TechSupport", "Fraud"}
+    assert len({v.name for v in cfg.vqs}) == 12
+    per_lob = {l.name: sorted((v for v in cfg.vqs if v.lob == l.name), key=lambda v: -v.weight) for l in cfg.lobs}
+    assert all(per_lob[l] for l in per_lob)
+    assert per_lob["Sales"][0].name == "VQ_Sales_New" and per_lob["TechSupport"][0].name == "VQ_Tech_Tier1"
+    # Zipf inside each LOB: strictly decreasing, leader clearly dominant
+    for vqs in per_lob.values():
+        assert all(a.weight > b.weight for a, b in zip(vqs, vqs[1:]))
+    assert per_lob["Sales"][0].weight > 2 * per_lob["Sales"][-1].weight
+    assert sum(1 for v in cfg.vqs if v.pbr_enabled) == 3
+    assert all(v.lob == "Sales" for v in cfg.vqs if v.pbr_enabled)
+    assert sum(1 for v in cfg.vqs if v.open_hour == 0 and v.close_hour == 24) == 3
+    assert all(v.lob == "TechSupport" for v in cfg.vqs if v.open_hour == 0 and v.close_hour == 24)
+    assert sum(1 for v in cfg.vqs if v.days == "Mon-Fri") == 3
+    # every non-leader overflows to its LOB leader, leaders do not overflow
+    for lob, vqs in per_lob.items():
+        assert vqs[0].overflow_vq is None
+        assert all(v.overflow_vq == vqs[0].name for v in vqs[1:])
+    # niche queues talk longer than their LOB leader
+    assert per_lob["Sales"][-1].talk_median_s > per_lob["Sales"][0].talk_median_s
+    fraud = next(l for l in cfg.lobs if l.name == "Fraud")
+    assert fraud.short == "FRA" and fraud.business_outcomes
+    with pytest.raises(ValueError, match="n_vqs"):
+        load_config(overrides={"catalogue": {"mode": "auto", "auto": {"n_vqs": 2, "lobs": ["Sales", "Billing", "Fraud"]}}})
+    with pytest.raises(ValueError, match="lob_shares"):
+        load_config(overrides={"catalogue": {"mode": "auto", "auto": {"lobs": ["Sales"], "lob_shares": {"Nope": 1}}}})
+    with pytest.raises(ValueError, match="catalogue.mode"):
+        load_config(overrides={"catalogue": {"mode": "magic"}})
+
+
+@pytest.mark.parametrize("config_file", ["configs/catalogue_manual.yaml", "configs/catalogue_auto.yaml"])
+def test_catalogue_example_configs_generate(tmp_path, config_file):
+    cfg = load_config(config_file, overrides={"days": 1, "start_date": "2026-08-04", "calls_per_day": 3000,
+                                              "customers": {"pool_size": 5000},
+                                              "output": {"directory": str(tmp_path)}})
+    stats = generate(cfg)
+    assert stats["rows"] > 0 and stats["outcome_rows"] > 0
+    t = ds.dataset(os.path.join(tmp_path, "interaction_resource_fact"), format="parquet", partitioning="hive").to_table()
+    seen = set(t["VQ_NAME"].to_pylist()) - {None}
+    assert seen <= {v.name for v in cfg.vqs} and len(seen) >= len(cfg.vqs) - 1
+    assert set(t["LOB"].to_pylist()) - {None} <= {l.name for l in cfg.lobs}
+
+
+def test_default_mode_unchanged_by_catalogue_resolution():
+    a = config_to_dict(default_config())
+    b = config_to_dict(load_config())
+    assert a == b
 
 
 def test_per_vq_behaviour_overrides(tmp_path):

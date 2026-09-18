@@ -1,0 +1,46 @@
+# =====================================================================================
+#  catalogue.mode: auto  -  "I want N queues over these LOBs, you design them"
+#
+#      python -m gim_synth catalogue --config configs/catalogue_auto.yaml   # see what you get
+#      python -m gim_synth generate  --config configs/catalogue_auto.yaml
+#
+#  The generator picks names (VQ_<LOB>_<suffix>, deterministic), an unbalanced volume split,
+#  opening hours, AHT / patience / SL profiles, which queues run PBR, overflow paths, home
+#  sites, outcome catalogues and transfer maps. Every number below is optional - the defaults
+#  reproduce the shape of the built-in catalogue at any size.
+# =====================================================================================
+days: 7
+calls_per_day: 40000
+
+catalogue:
+  mode: auto
+  auto:
+    n_vqs: 25                 # total virtual queues (at least one per LOB)
+    lobs:                     # library LOBs bring realistic behaviour; unknown names get generic
+      - Sales
+      - Retention
+      - CustomerService
+      - TechSupport
+      - Billing
+      - Fraud                 # not in the library -> CustomerService-like outcomes, 08-20 hours
+    lob_shares:               # inbound share per LOB (relative; unspecified LOBs use library shares)
+      Sales: 0.30
+      CustomerService: 0.30
+      TechSupport: 0.20
+      Retention: 0.10
+      Billing: 0.07
+      Fraud: 0.03
+    volume_skew: 1.3          # 0 = all queues of a LOB equal, 1.3 = one monster + long tail per LOB
+    pbr_share: 0.3            # ~8 of 25 queues on PBR (Sales / Retention first)
+    always_open_share: 0.12   # ~3 queues 24x7 (biggest CustomerService / TechSupport)
+    weekday_only_share: 0.2   # 5 smallest queues Mon-Fri 08-20
+    overflow_share: 0.6       # 60 % of non-leader queues overflow to their LOB leader
+    aht_spread: 0.15          # niche queues talk 15 % longer per rank
+    name_pattern: "VQ_{abbrev}_{suffix}"
+
+# You can still pin details on the generated names once you have looked at `catalogue`:
+vq_weights:
+  VQ_Fraud_General: 0.05      # make fraud bigger than its LOB share implied
+vq_overrides:
+  VQ_Tech_Tier2: {rona_prob: 0.06, wait_scale: 1.3}
+  VQ_Retention_Cancel: {pbr_skew: 1.1}

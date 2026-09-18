@@ -10,7 +10,8 @@
 #  * Any key you leave out keeps its default (this file == the defaults exactly, so it is
 #    safe to start from).  CLI flags (--days, --calls-per-day, --seed, --out ...) win over YAML.
 #  * The lists `sites`, `lobs`, `vqs` are replaced as a whole when present. To change only a
-#    few queues use the shortcuts `vq_weights` / `vq_overrides` at the bottom instead.
+#    few queues use the shortcuts `vq_weights` / `vq_overrides` at the bottom instead. To define
+#    your own queues with minimal typing (or have them designed for you) see `catalogue:`.
 #  * All probability tables (weights, mixes, dispositions ...) are relative: they are
 #    normalised automatically, so they do not have to add up to 1.
 #  * Durations are seconds unless the name says otherwise (_h = hours, _min = minutes).
@@ -32,6 +33,8 @@
 #    more transfers/consults   lobs[].outcome_weights (blind_transfer, warm_transfer, consult_only,
 #                              conference, multi_hop, external_transfer)
 #    volume split ...........  vqs[].weight or vq_weights
+#    own queues / LOBs ......  catalogue.mode: manual (list them, `auto` fills the rest) or
+#                              catalogue.mode: auto (just n_vqs + lobs); see the `catalogue:` block
 #    business outcomes ......  lobs[].business_outcomes (Sale / Saved / Cancelled / NoChange ... with
 #                              weights, amounts, agent_lift), outcomes.* for the agent / segment /
 #                              wait effects, cross-sell and follow-up timing
@@ -240,6 +243,72 @@ output:
   partition_by_day: true      # true: call_date=YYYY-MM-DD/part-0.parquet ; false: one file per table
   write_dimensions: true      # write dim_site / dim_lob / dim_vq / dim_agent / dim_customer
   validate: true              # run the invariant checks per day on both tables (abort on failure)
+
+
+# ------------------------------------------------------------------ queue catalogue: which LOBs / VQs exist
+# Decide HOW the `lobs:` and `vqs:` lists further down come about. Three modes:
+#
+#   default : use the built-in catalogue exactly as listed below (6 LOBs, 18 VQs, deliberately
+#             unbalanced). Nudge it with vq_weights / vq_overrides at the bottom.
+#
+#   manual  : YOU list the queues you want under `vqs:` and the generator fills in the rest.
+#             Minimum per queue is  {name: VQ_xxx, lob: Sales}.  Every other VQ field may be
+#             left out or set to the word `auto`:
+#               weight              auto => the auto-weight queues share `manual.auto_weight_share`
+#                                   of the volume (Zipf-split in listing order, first = biggest);
+#                                   if every weight is auto the whole volume is Zipf-split
+#               skill               auto => SK_<LOB short>_<name suffix>
+#               open/close/days     auto => the LOB's typical hours (Sales 08-21, Billing 07-22 ...)
+#               talk/hold/acw/asa/patience/service_level_s
+#                                   auto => the LOB's AHT profile (from its biggest built-in queue)
+#               pbr_enabled         auto => true for Sales / Retention queues, else false
+#               pbr_skew, pbr_premium_boost   auto => LOB template
+#               overflow_vq         auto => the biggest OTHER queue of the same LOB (leaders: none);
+#                                   leave out or null => no overflow
+#               home_site           auto => sites in turn (24x7 queues go to an offshore site)
+#               short_abandon_prob, abandon_while_ringing_prob, rona_prob, ivr_contained_prob
+#                                   auto / null => the global inbound.* / ivr.* value
+#             `lobs:` is optional: LOBs named by your queues are created automatically. Known
+#             names (Sales, Retention, CustomerService, TechSupport, Billing, Collections) bring
+#             their outcome catalogue, handling mix and transfer map; any other name
+#             (Complaints, HelpDesk, Fraud ...) gets the CustomerService behaviour until you add
+#             its own `business_outcomes` / `outcome_weights`. `transfer_targets: auto` (or left
+#             out) => 40 % to the LOB's other queues, 60 % to the leaders of the other LOBs.
+#             Built-in outbound campaigns whose LOB no longer exists are dropped.
+#
+#   auto    : you only give the numbers under `auto:` - the generator designs the whole catalogue
+#             (names, unbalanced volume split, hours, AHT profile, PBR queues, overflow paths,
+#             sites, transfer maps). Check the result with:
+#                 python -m gim_synth catalogue --config my_config.yaml
+#             and pin down details with vq_weights / vq_overrides (names are deterministic:
+#             VQ_<LOB>_<suffix>, e.g. VQ_Sales_New, VQ_Sales_Upgrade, VQ_Tech_Tier1 ...).
+#
+# Ready-made examples: configs/catalogue_manual.yaml and configs/catalogue_auto.yaml.
+catalogue:
+  mode: default               # default | manual | auto
+  auto:                       # used only when mode: auto
+    n_vqs: 18                 # how many virtual queues in total (>= number of LOBs)
+    lobs:                     # which LOBs; library names get realistic behaviour, others generic
+      - CustomerService
+      - Sales
+      - TechSupport
+      - Billing
+      - Retention
+      - Collections
+    lob_shares: {}            # inbound volume share per LOB, relative. Missing LOBs take the
+                              # library share (CS 32, Sales 25, Tech 18, Billing 12, Ret 10, Col 3 %;
+                              # unknown LOBs an equal slice). e.g. {Sales: 0.5, Complaints: 0.1}
+    volume_skew: 1.3          # how unbalanced the queues of one LOB are: 0 = equal volume,
+                              # 1 = 2nd queue gets 1/2 of the 1st, 3rd 1/3 ...; 1.3 = monster + long tail
+    pbr_share: 0.33           # fraction of VQs with PBR routing (Sales / Retention, biggest first)
+    always_open_share: 0.15   # fraction of VQs open 24x7 (biggest CustomerService / TechSupport first)
+    weekday_only_share: 0.15  # fraction of VQs open Mon-Fri 08-20 only (smallest queues first)
+    overflow_share: 0.6       # fraction of non-leader VQs that overflow to their LOB's biggest queue
+    aht_spread: 0.15          # niche queues talk longer: talk median x (1 + aht_spread x rank in LOB)
+    name_pattern: "VQ_{abbrev}_{suffix}"   # placeholders: {lob} {abbrev} {short} {suffix} {n}
+  manual:                     # used only when mode: manual
+    auto_weight_share: 0.2    # volume share handed to the queues whose weight is `auto`
+    volume_skew: 1.3          # Zipf exponent for splitting it among them (listing order)
 
 
 # ------------------------------------------------------------------ sites

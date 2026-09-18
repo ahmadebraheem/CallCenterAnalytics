@@ -38,7 +38,7 @@ Documentation:
 | Document | Contents |
 |---|---|
 | this README | concepts, quick start, configuration, model description, output layout |
-| [docs/DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | every column of the two fact tables and the dimension tables |
+| [docs/DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | the 7 output tables, their relationships and every column (2 facts, 5 dimensions); also emitted as `_data_dictionary.csv` |
 | [docs/SCENARIOS.md](docs/SCENARIOS.md) | every scenario the generator produces and exactly how it is encoded, incl. the business-outcome model (§11) |
 
 ---
@@ -62,6 +62,9 @@ python -m gim_synth print-config
 
 # quick statistics of a generated dataset
 python -m gim_synth summarize --out ./out
+
+# data dictionary of all 7 tables (markdown; --format csv, --table dim_vq to narrow)
+python -m gim_synth dictionary
 
 python -m pytest -q                       # tests
 ```
@@ -97,8 +100,14 @@ out/
 ├── dim_vq.parquet                                # queues / virtual queues / route points / DNIS
 ├── dim_agent.parquet                             # roster incl. shift, skills, days off
 ├── dim_customer.parquet                          # customer ids, ANI, segment
+├── _data_dictionary.csv                          # table / column / type / nullable / description, all 7 tables
 └── _manifest.json                                # effective config, per-day stats & events, counts
 ```
+
+Seven tables in total: two facts (`interaction_resource_fact`, `interaction_outcome_fact`) and
+five dimensions (`dim_site`, `dim_lob`, `dim_vq`, `dim_agent`, `dim_customer`), 158 columns
+altogether. The dictionary is generated from the Arrow schemas by `gim_synth/dictionary.py`
+and a test fails if any column lacks a description.
 
 Read it with anything that speaks Parquet, e.g.
 

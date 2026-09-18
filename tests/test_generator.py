@@ -77,6 +77,32 @@ def test_outputs_written(small_run, outcomes):
     assert manifest["amount_totals_by_type"]["Revenue"] > 0
 
 
+def test_data_dictionary_covers_every_column(small_run, outcomes):
+    import csv
+    import pyarrow.parquet as pq
+    from gim_synth.dictionary import COLUMN_DESCRIPTIONS, dictionary_markdown
+
+    cfg, stats, table, out = small_run
+    with open(os.path.join(out, "_data_dictionary.csv"), newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    tables = {"interaction_resource_fact": table, "interaction_outcome_fact": outcomes}
+    for dim in ("dim_site", "dim_lob", "dim_vq", "dim_agent", "dim_customer"):
+        tables[dim] = pq.read_table(os.path.join(out, f"{dim}.parquet"))
+    assert set(r["TABLE_NAME"] for r in rows) == set(tables) == set(COLUMN_DESCRIPTIONS)
+    for name, t in tables.items():
+        if "call_date" in t.column_names:  # hive partition column added by the dataset reader
+            t = t.drop_columns(["call_date"])
+        described = [r for r in rows if r["TABLE_NAME"] == name]
+        assert [r["COLUMN_NAME"] for r in described] == t.column_names, name
+        assert [r["DATA_TYPE"] for r in described] == [str(f.type) for f in t.schema], name
+        assert all(r["DESCRIPTION"].strip() for r in described), name
+        for r in described:
+            if r["NULLABLE"] == "no":
+                assert t[r["COLUMN_NAME"]].null_count == 0, f"{name}.{r['COLUMN_NAME']} documented as non-null"
+    md = dictionary_markdown([{**r, "ORDINAL": int(r["ORDINAL"])} for r in rows])
+    assert md.count("\n## ") + md.startswith("## ") == len(tables)
+
+
 def test_schema_and_invariants(small_run, outcomes):
     cfg, stats, table, out = small_run
     assert set(table.column_names) >= set(COLUMNS)

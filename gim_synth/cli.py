@@ -49,6 +49,22 @@ def _cmd_print_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dictionary(args: argparse.Namespace) -> int:
+    from .dictionary import build_dictionary, dictionary_csv, dictionary_markdown
+    from .refdata import build_refdata
+
+    cfg = load_config(args.config) if args.config else default_config()
+    dims = build_refdata(cfg).dimension_tables()
+    rows = build_dictionary({n: t.schema for n, t in dims.items()})
+    if args.table:
+        rows = [r for r in rows if r["TABLE_NAME"] == args.table]
+        if not rows:
+            print(f"unknown table {args.table}", file=sys.stderr)
+            return 1
+    print(dictionary_csv(rows) if args.format == "csv" else dictionary_markdown(rows), end="")
+    return 0
+
+
 def _cmd_summarize(args: argparse.Namespace) -> int:
     import pyarrow.compute as pc
     import pyarrow.dataset as ds
@@ -200,6 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("summarize", help="print quick statistics of a generated dataset")
     s.add_argument("--out", default="./out")
     s.set_defaults(func=_cmd_summarize)
+
+    d = sub.add_parser("dictionary", help="print the data dictionary of all output tables")
+    d.add_argument("--config", help="YAML file (the dictionary is schema-driven; the config only affects dimension contents)")
+    d.add_argument("--table", help="restrict to one table, e.g. dim_vq")
+    d.add_argument("--format", choices=["markdown", "csv"], default="markdown")
+    d.set_defaults(func=_cmd_dictionary)
     return p
 
 

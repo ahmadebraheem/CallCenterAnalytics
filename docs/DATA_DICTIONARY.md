@@ -1,8 +1,35 @@
 # Data dictionary
 
-All tables are Parquet. Timestamps are `timestamp[ms]`; the naive ones are local business time
-(`timezone` in the config, default `America/New_York`), `ARRIVE_TIME_UTC` carries `tz=UTC`.
-Flags are `int8` 0/1 (never null) unless stated otherwise. Durations are whole seconds (`int32`).
+The generator writes **7 tables** (all Parquet) plus a run manifest:
+
+| # | Table | Grain | Rows (default month) | Partitioned |
+|---|---|---|---|---|
+| 1 | `interaction_resource_fact` | one row per resource leg of a voice interaction | ~1.3 M | `call_date=` |
+| 2 | `interaction_outcome_fact` | one row per business outcome recorded on a handled customer leg | ~0.7 M | `call_date=` |
+| 3 | `dim_site` | one row per site | 4 | – |
+| 4 | `dim_lob` | one row per line of business | 6 | – |
+| 5 | `dim_vq` | one row per virtual queue | 18 | – |
+| 6 | `dim_agent` | one row per agent | ~1 900 | – |
+| 7 | `dim_customer` | one row per customer | 400 000 | – |
+| – | `_manifest.json` | run summary (config, per-day stats, counts, files) | | |
+| – | `_data_dictionary.csv` | this dictionary in machine-readable form (table, column, type, nullable, description) | 158 columns | |
+
+The same dictionary is available from the CLI (`python -m gim_synth dictionary [--table dim_vq]
+[--format csv]`); it is generated from the code (`gim_synth/dictionary.py`) against the actual
+Arrow schemas, so it cannot drift from the data.
+
+Relationships:
+
+```
+dim_site ──┐                          dim_customer ─── CUSTOMER_ID ──┐
+dim_lob  ──┼─ SITE / LOB ──▶ interaction_resource_fact ◀── IRF_ID ── interaction_outcome_fact
+dim_vq   ──┘  VQ_ID / VQ_NAME        ▲   │ ROOT_INTERACTION_ID (whole call, incl. consults)
+dim_agent ─── AGENT_ID ──────────────┘   │ PARENT_INTERACTION_ID / PREVIOUS_CALL_ID (lineage)
+```
+
+Timestamps are `timestamp[ms]`; the naive ones are local business time (`timezone` in the config,
+default `America/New_York`), `*_UTC` columns carry `tz=UTC`. Flags are `int8` 0/1 (never null)
+unless stated otherwise. Durations are whole seconds (`int32`).
 
 ## interaction_resource_fact
 
@@ -67,8 +94,8 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | Column | Type | Description |
 |---|---|---|
 | `ROUTE_POINT` | string, nullable | Route point DN the call entered on (`RP_8001`…). For overflowed calls this is the *original* VQ's route point. Null for direct DID / outbound manual / internal. |
-| `DNIS` | string, nullable | Number dialled: the VQ's toll-free DNIS for inbound, the agent DID for direct calls / consults / internal, the customer number for outbound. |
-| `ANI` | string, nullable | Calling number: the customer's ANI for inbound, the site outbound CLI (or VQ DNIS for callbacks) for outbound, the initiating agent id for consult legs, agent DID for internal. |
+| `DNIS` | string | Number dialled: the VQ's toll-free DNIS for inbound, the agent DID for direct calls / consults / internal, the customer number for outbound, the external number for external legs. |
+| `ANI` | string | Calling number: the customer's ANI for inbound, the site outbound CLI (or VQ DNIS for callbacks) for outbound, the initiating agent id for consult legs, agent DID for internal. |
 | `QUEUE_ID` | string, nullable | ACD queue DN behind the VQ (`9001`…). |
 | `QUEUE_NAME` | string, nullable | ACD queue name (`Q_SALES_NEW`…). |
 | `VQ_ID` | int32, nullable | Virtual queue id (`3001`…). |
@@ -188,27 +215,100 @@ and conversion rises monotonically with `AGENT_PBR_SCORE` (see README §6).
 
 ## Dimension tables
 
+Written once per run as single Parquet files (`write_dimensions: true`). They are the reference
+data the facts were generated from, so every fact key resolves.
+
 ### dim_site
-`SITE`, `COUNTRY`, `OFFSHORE_FLAG`, `OUTBOUND_CLI`.
+
+One row per contact-centre site. Primary key `SITE`.
+
+| Column | Type | Description |
+|---|---|---|
+| `SITE` | string | Site name. Joins `interaction_resource_fact.SITE`, `interaction_outcome_fact.SITE`, `dim_agent.SITE`, `dim_vq.HOME_SITE`. |
+| `COUNTRY` | string | ISO country code (`US`, `CA`, `PH` ...). |
+| `OFFSHORE_FLAG` | int8 | 1 for offshore sites; they staff most of the night shifts. |
+| `OUTBOUND_CLI` | string | Caller id presented on outbound calls from this site (`ANI` of manual / dialer outbound legs). |
 
 ### dim_lob
-`LOB`, `LOB_SHORT`.
+
+One row per line of business. Primary key `LOB`.
+
+| Column | Type | Description |
+|---|---|---|
+| `LOB` | string | Line of business (`Sales`, `Retention`, `CustomerService`, `TechSupport`, `Billing`, `Collections`). Joins `LOB` on both facts, `dim_vq.LOB`, `dim_agent.LOB`. Also the key of the `lobs` config section (outcome catalogue, transfer targets). |
+| `LOB_SHORT` | string | Short code used in `AGENT_GROUP` names (`SAL`, `RET`, `CS`, `TEC`, `BIL`, `COL`). |
 
 ### dim_vq
-`VQ_ID`, `VQ_NAME`, `QUEUE_ID`, `QUEUE_NAME`, `ROUTE_POINT`, `DNIS`, `LOB`, `SKILL`, `HOME_SITE`,
-`OPEN_HOUR`, `CLOSE_HOUR` (24 = midnight; 0/24 = 24x7), `OPEN_DAYS` (`Mon-Sun` / `Mon-Sat` / `Mon-Fri`),
-`SERVICE_LEVEL_S`, `OVERFLOW_VQ_NAME`, `ROUTING_METHOD` (`ACD`/`PBR`), `PBR_ENABLED_FLAG`, `PBR_SKEW`
-(log-normal sigma of agent weights, null for ACD queues), `ROSTER_SIZE` (agents skilled for the VQ),
-`EXPECTED_AHT_S`.
+
+One row per virtual queue. Primary key `VQ_ID` (`VQ_NAME` is unique too).
+
+| Column | Type | Description |
+|---|---|---|
+| `VQ_ID` | int32 | Virtual queue id. Joins `interaction_resource_fact.VQ_ID`. |
+| `VQ_NAME` | string | Virtual queue name. Joins `VQ_NAME`, `ORIGINAL_VQ_NAME`, `TRANSFER_TO` (VQ transfers) on the fact and the key of `vq_overrides` in the config. |
+| `QUEUE_ID` | string | ACD queue DN behind the VQ. |
+| `QUEUE_NAME` | string | ACD queue name. |
+| `ROUTE_POINT` | string | Route point DN calls to this VQ enter on. |
+| `DNIS` | string | Toll-free number dialled to reach this VQ. |
+| `LOB` | string | Line of business. |
+| `SKILL` | string | Skill expression required to take calls from the VQ. |
+| `HOME_SITE` | string | Site reported on queue legs that never reached an agent (abandons, callback requests). |
+| `OPEN_HOUR` | int8 | Local opening hour (0–23). |
+| `CLOSE_HOUR` | int8 | Local closing hour (1–24; 24 = midnight; `OPEN_HOUR` 0 / `CLOSE_HOUR` 24 = 24x7). Calls outside the window become `AfterHours`. |
+| `OPEN_DAYS` | string | `Mon-Sun`, `Mon-Sat` or `Mon-Fri`. |
+| `SERVICE_LEVEL_S` | int16 | Service-level threshold in seconds used to compute `SERVICE_LEVEL_FLAG`. |
+| `OVERFLOW_VQ_NAME` | string, nullable | Backup VQ that calls overflow to after `overflow_wait_s`; null when the VQ has none. |
+| `ROUTING_METHOD` | string | `ACD` (longest idle, uniform across agents) or `PBR` (Predictive Behavioural Routing, skewed towards high-scoring agents). |
+| `PBR_ENABLED_FLAG` | int8 | 1 when the VQ uses PBR. |
+| `PBR_SKEW` | float32, nullable | Strength of the PBR skew: agent weight = exp(`PBR_SKEW` × agent quality z-score), i.e. the log-normal sigma of agent weights (0 = uniform, 1.2 = extreme). Null for ACD queues. |
+| `ROSTER_SIZE` | int32 | Number of agents skilled for the VQ (primary or secondary skill). |
+| `EXPECTED_AHT_S` | float32 | Expected average handle time in seconds (talk + expected hold + ACW) used by the staffing model. |
 
 ### dim_agent
-`AGENT_ID`, `AGENT_NAME`, `AGENT_GROUP`, `SITE`, `LOB`, `AGENT_TENURE_BAND`, `PRIMARY_VQ_NAME`,
-`SKILLS` (pipe separated), `SHIFT_START_HOUR`, `SHIFT_LEN_H`, `DAYS_OFF` (pipe separated weekday
-names), `SPEED_FACTOR` (multiplier on talk / ACW), `PBR_SCORE` (percentile rank 0–1 of the agent's
-predicted-outcome quality; drives how often PBR queues pick the agent), `AGENT_DID`.
+
+One row per agent. Primary key `AGENT_ID`.
+
+| Column | Type | Description |
+|---|---|---|
+| `AGENT_ID` | string | Employee id. Joins `AGENT_ID` on both facts and `TRANSFER_TO` (agent transfers). |
+| `AGENT_NAME` | string | Display name. |
+| `AGENT_GROUP` | string | Team, `{LOB_SHORT}_{SITE}_TEAMnn`. |
+| `SITE` | string | Site the agent works from. |
+| `LOB` | string | Line of business of the agent's primary skill. |
+| `AGENT_TENURE_BAND` | string | `<3m`, `3-12m`, `1-3y`, `3y+`. Newer agents are slower (`SPEED_FACTOR`) and have lower PBR quality on average. |
+| `PRIMARY_VQ_NAME` | string | VQ of the agent's primary skill. |
+| `SKILLS` | string | Pipe-separated skill expressions the agent carries (primary plus an optional secondary skill in the same LOB). |
+| `SHIFT_START_HOUR` | int8 | Local hour the shift starts (0–23). |
+| `SHIFT_LEN_H` | float32 | Shift length in hours. |
+| `DAYS_OFF` | string | Pipe-separated weekday names the agent does not work. |
+| `SPEED_FACTOR` | float32 | Multiplier applied to the agent's talk and ACW times (1.0 = average). |
+| `PBR_SCORE` | float32 | Percentile rank (0–1) of the agent's latent quality. Drives how often PBR queues pick the agent (`PBR_SCORE` on the fact) and the agent effect on business outcomes (`AGENT_PBR_SCORE` on the outcome fact). |
+| `AGENT_DID` | string | Direct-dial number (`DNIS` of direct / consult / internal legs). |
 
 ### dim_customer
-`CUSTOMER_ID`, `ANI`, `CUSTOMER_SEGMENT`.
+
+One row per customer in the pool. Primary key `CUSTOMER_ID`.
+
+| Column | Type | Description |
+|---|---|---|
+| `CUSTOMER_ID` | string | Customer key. Joins `CUSTOMER_ID` on both facts. |
+| `ANI` | string | Phone number (`ANI` of the customer's inbound legs, `DNIS` of outbound legs to them). |
+| `CUSTOMER_SEGMENT` | string | `Consumer`, `SMB`, `Enterprise` or `VIP`; drives the outcome `segment_lift` and the share of premium routing. |
+
+## _data_dictionary.csv
+
+Machine-readable version of this document, written next to the data on every run and printable
+with `python -m gim_synth dictionary`. One row per column of every table:
+
+| Column | Description |
+|---|---|
+| `TABLE_NAME` | One of the 7 tables above. |
+| `TABLE_DESCRIPTION` | Grain of the table. |
+| `COLUMN_NAME` | Column name. |
+| `ORDINAL` | 1-based position in the Parquet schema. |
+| `DATA_TYPE` | Arrow type as written (`int64`, `string`, `timestamp[ms]`, `timestamp[ms, tz=UTC]`, `date32[day]` ...). |
+| `NULLABLE` | `yes` / `no` — whether the column can be null in generated data. |
+| `DESCRIPTION` | Column definition. |
 
 ## _manifest.json
 

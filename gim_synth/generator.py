@@ -14,6 +14,7 @@ import numpy as np
 
 from .arrivals import MINUTES, arrival_seconds, build_day_profile, expected_wait_curve
 from .config import GeneratorConfig, config_to_dict
+from .dictionary import build_dictionary, dictionary_csv
 from .refdata import RefData, build_refdata, vq_probabilities_by_hour
 from .scenarios import LegBuilder
 from .validate import ValidationError, validate_outcomes, validate_table
@@ -53,9 +54,12 @@ class Generator:
         t0 = time.time()
         self.log(f"roster: {len(self.ref.agents)} agents across {len(self.ref.vqs)} VQs, "
                  f"{len(self.ref.customer_ids)} customers")
+        dims = self.ref.dimension_tables()
         if out.write_dimensions:
-            for name, table in self.ref.dimension_tables().items():
+            for name, table in dims.items():
                 writer.write_dimension(name, table)
+        with open(os.path.join(out.directory, "_data_dictionary.csv"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(dictionary_csv(build_dictionary({n: t.schema for n, t in dims.items()})))
         try:
             for d in range(cfg.days):
                 day = self.start + timedelta(days=d)

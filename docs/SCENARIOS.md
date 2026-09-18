@@ -47,12 +47,19 @@ The wait is drawn from the VQ's expected-wait curve for that minute (load driven
 Otherwise the call is answered (`QUEUE_TIME` = wait, `RING_TIME` 2–20 s) and an outcome from §4
 is drawn using the LOB's `outcome_weights`.
 
+All of the probabilities above are global (`inbound.*`, `ivr.contained_prob`) but can be overridden
+per queue with `vqs[].short_abandon_prob`, `abandon_while_ringing_prob`, `rona_prob`,
+`ivr_contained_prob`; `vqs[].wait_scale` multiplies every drawn wait for that queue (a cheap way to
+make one queue – e.g. L2 tech support – consistently slower and more abandon-prone). See
+`configs/full_config.yaml`.
+
 ## 4. Inbound – answered outcomes
 
 Common encoding of the answered agent leg: `RESOURCE_TYPE=Agent`, `RESOURCE_ROLE=Received`
 (`ReceivedTransfer` when it arrived via a transfer), `ANSWERED_FLAG=1`, `N_AGENT=1`, `N_CUSTOMER=1`,
-`SERVICE_LEVEL_FLAG` = 1/0 against the VQ threshold, `DISPOSITION` from the LOB list,
-`DISCONNECT_REASON` Customer (65 %) / Agent (35 %) unless stated.
+`SERVICE_LEVEL_FLAG` = 1/0 against the VQ threshold, `DISPOSITION` = the primary business outcome
+(§11, also written to `interaction_outcome_fact`), `DISCONNECT_REASON` Customer (65 %) / Agent
+(35 %) unless stated.
 
 | Scenario | Typical LOB weight | Behaviour | Encoding specifics |
 |---|---|---|---|
@@ -170,3 +177,65 @@ under 20 % of agents handle half the calls. `python -m gim_synth summarize` prin
 * Skewed customer selection (`skew_power` 2.5) produces repeat callers; `FIRST_CALL_FLAG` and `REPEAT_CALL_7D_FLAG` are computed from the customer's contact history across the whole run, including outbound contacts.
 * Patience is log-normal per VQ (e.g. Retention customers wait longer than Sales prospects).
 * Segments (Consumer 72 %, SMB 15 %, Enterprise 5 %, VIP 8 %) are carried on every customer-facing leg.
+
+## 11. Business outcomes (interaction_outcome_fact)
+
+Every leg on which an agent actually spoke with a customer records what came out of it for the
+business. The outcome is drawn **after** the leg's timing is known, so it can depend on the agent,
+the customer and the wait, and it is written both as `DISPOSITION` on the leg and as one or two
+rows in `interaction_outcome_fact` (see DATA_DICTIONARY.md for the columns).
+
+### Which legs get an outcome
+
+| Leg | Outcome catalogue used | Notes |
+|---|---|---|
+| answered inbound (`normal`, `long`, `multi_hold`, `consult_only`, `conference` initiator) | VQ's LOB | one primary outcome, optional `CrossSell` |
+| `short` (4–30 s talk) | VQ's LOB, **Positive / monetary outcomes excluded** | wrong numbers and quick FAQs don't sell |
+| `warm_transfer_received`, `blind_transfer_to_agent` (answered) | receiving VQ's / agent's LOB | the receiving agent owns the outcome |
+| `direct_did`, `outbound_manual` (Answered) | agent's LOB | |
+| `dialer_answered`, `callback_outbound` (Answered) | campaign's / original VQ's LOB | |
+| `blind_transfer`, `warm_transfer`, `external_transfer` legs | – | `DISPOSITION=Transferred`, no outcome (it happens downstream) |
+| `conference_joined` | – | `DISPOSITION=Assisted`, the initiator records the outcome |
+| `system_drop`, abandons, RONA, IVR, consults, internal, answering machine, no answer | – | no outcome (`LeftMessage` disposition on answering machines) |
+
+### The catalogue (defaults, `lobs[].business_outcomes`)
+
+| LOB | Positive | Neutral | Negative |
+|---|---|---|---|
+| Sales | `Sale` (26 %, Revenue ≈ 65, product subtype) | `CallbackScheduled` (12 %, case), `Info` (20 %) | `NoSale` (30 %, reason subtype), `NotInterested` (12 %) |
+| Retention | `Saved` (32 %, MRR_Retained ≈ 85, offer subtype) | `Downgraded` (12 %, MRR_Lost ≈ 25), `NoChange` (14 %), `PendingDecision` (10 %, case) | `Cancelled` (20 %, MRR_Lost ≈ 85, reason subtype), `OfferDeclined` (12 %) |
+| CustomerService | `Resolved` (52 %) | `FollowUp` (14 %, case), `Info` (17 %) | `Escalated` (9 %, case), `Unresolved` (8 %) |
+| TechSupport | `Resolved` (48 %) | `Dispatch` (12 %, case), `FollowUp` (14 %, case), `Info` (7 %) | `Escalated` (14 %, case), `Unresolved` (5 %) |
+| Billing | `PaymentTaken` (33 %, Payment ≈ 120), `Adjusted` (18 %, Credit ≈ 30) | `Info` (27 %) | `Disputed` (12 %, case), `Escalated` (10 %, case) |
+| Collections | `PromiseToPay` (33 %, Promise ≈ 180, promise date), `Paid` (24 %, Payment ≈ 160) | `Hardship` (8 %, case), `NoChange` (7 %) | `Refused` (15 %), `Dispute` (13 %, case) |
+| any | `CrossSell` secondary (5 % baseline, Revenue ≈ 18) | | |
+
+Percentages are the **baseline** weights; the realised mix shifts with the effects below (e.g. the
+default week shows `Sale` ≈ 36 % because PBR sends Sales calls to the better agents).
+
+### What bends the probabilities
+
+| Effect | Knob | Default behaviour |
+|---|---|---|
+| Agent quality | `business_outcomes[].agent_lift` × `outcomes.agent_effect_scale` | log-odds shift per unit of the agent's latent PBR quality: `Sale` +0.6, `Saved` +0.7, `Resolved` +0.35…+0.4, `Cancelled` −0.5, `Escalated` −0.3. Positive-outcome rate rises from ~32 % (bottom score quartile) to ~56 % (top quartile). |
+| Routing method | (consequence of PBR) | PBR queues pick high-quality agents, so PBR-routed Sales/Retention calls convert at ~41 % vs ~28 % on the ACD overflow / loyalty queues |
+| Customer segment | `outcomes.segment_lift` | VIP +0.35, Enterprise +0.25, SMB +0.10 log-odds on Positive outcomes |
+| Queue wait | `outcomes.wait_penalty_per_min` | −0.12 log-odds per minute waited beyond the first on Positive outcomes: <1 min ≈ 45 % positive, 5–15 min ≈ 34 %, >15 min ≈ 10 % |
+| Call length | fixed rule | `short` handling never yields Positive / monetary outcomes |
+| Cross-sell | `outcomes.cross_sell_prob`, `outcomes.cross_sell` | 5 % baseline, scaled by the same agent / segment lifts, only when the primary outcome is not Negative |
+
+### Timestamps
+
+* `OUTCOME_TIME` – monetary outcomes happen inside the conversation (50–97 % into the talk);
+  other outcomes are coded at wrap-up, except `in_call_event_prob` (35 %) of them.
+* `RECORDED_TIME` – inside the ACW window (`END_TIME`…`ACW_END_TIME`) or at `END_TIME` when the
+  leg has no ACW; always ≥ `OUTCOME_TIME`.
+* `FOLLOW_UP_DUE_TIME` – 1–5 days later at a business hour (3–14 days for promises to pay).
+
+### Invariants checked per day
+
+Every outcome joins to exactly one answered agent leg with a customer party; the primary
+`BUSINESS_RESULT` equals the leg's `DISPOSITION`; one primary per leg, secondaries are `CrossSell`
+only; `ANSWER_TIME ≤ OUTCOME_TIME ≤ RECORDED_TIME ≤ ACW_END_TIME`; `AMOUNT`/`CURRENCY` present iff
+`AMOUNT_TYPE`; `CASE_ID`/`FOLLOW_UP_DUE_TIME` present iff `FOLLOW_UP_FLAG`, due after
+`RECORDED_TIME`.

@@ -1,8 +1,35 @@
 # Data dictionary
 
-All tables are Parquet. Timestamps are `timestamp[ms]`; the naive ones are local business time
-(`timezone` in the config, default `America/New_York`), `ARRIVE_TIME_UTC` carries `tz=UTC`.
-Flags are `int8` 0/1 (never null) unless stated otherwise. Durations are whole seconds (`int32`).
+The generator writes **7 tables** (all Parquet) plus a run manifest:
+
+| # | Table | Grain | Rows (default month) | Partitioned |
+|---|---|---|---|---|
+| 1 | `interaction_resource_fact` | one row per resource leg of a voice interaction | ~1.3 M | `call_date=` |
+| 2 | `interaction_outcome_fact` | one row per business outcome recorded on a handled customer leg | ~0.7 M | `call_date=` |
+| 3 | `dim_site` | one row per site | 4 | – |
+| 4 | `dim_lob` | one row per line of business | 6 | – |
+| 5 | `dim_vq` | one row per virtual queue | 18 | – |
+| 6 | `dim_agent` | one row per agent | ~1 900 | – |
+| 7 | `dim_customer` | one row per customer | 400 000 | – |
+| – | `_manifest.json` | run summary (config, per-day stats, counts, files) | | |
+| – | `_data_dictionary.csv` | this dictionary in machine-readable form (table, column, type, nullable, description) | 158 columns | |
+
+The same dictionary is available from the CLI (`python -m gim_synth dictionary [--table dim_vq]
+[--format csv]`); it is generated from the code (`gim_synth/dictionary.py`) against the actual
+Arrow schemas, so it cannot drift from the data.
+
+Relationships:
+
+```
+dim_site ──┐                          dim_customer ─── CUSTOMER_ID ──┐
+dim_lob  ──┼─ SITE / LOB ──▶ interaction_resource_fact ◀── IRF_ID ── interaction_outcome_fact
+dim_vq   ──┘  VQ_ID / VQ_NAME        ▲   │ ROOT_INTERACTION_ID (whole call, incl. consults)
+dim_agent ─── AGENT_ID ──────────────┘   │ PARENT_INTERACTION_ID / PREVIOUS_CALL_ID (lineage)
+```
+
+Timestamps are `timestamp[ms]`; the naive ones are local business time (`timezone` in the config,
+default `America/New_York`), `*_UTC` columns carry `tz=UTC`. Flags are `int8` 0/1 (never null)
+unless stated otherwise. Durations are whole seconds (`int32`).
 
 ## interaction_resource_fact
 
@@ -38,7 +65,7 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | `TECHNICAL_RESULT` | string | Info Mart technical descriptor: `Completed`, `Abandoned`, `Transferred`, `Conferenced`, `Redirected` (RONA), `Diverted` (voicemail, callback), `Failed` (system error, no answer, busy). |
 | `TECHNICAL_RESULT_REASON` | string | Reason detail, e.g. `AnsweredByAgent`, `AbandonedWhileQueued`, `AbandonedWhileRinging`, `RouteOnNoAnswer`, `BlindTransfer`, `WarmTransfer`, `ExternalTransfer`, `ConferenceInitiated`, `ConferenceJoined`, `ConsultCompleted`, `IVRContained`, `AfterHoursAnnouncement`, `AfterHoursVoicemail`, `NoAnswerVoicemail`, `CallbackAccepted`, `SystemError`, `OutboundConnected`, `AnsweringMachine`, `NoAnswer`, `Busy`, `NoAgentAvailable`, `InternalCall`, `ExternalParty`, `ExternalNoAnswer`. |
 | `DISCONNECT_REASON` | string, nullable | Who released the leg: `Customer`, `Agent`, `System`, `Transfer` (leg ended because it was transferred). Null on RONA legs. |
-| `DISPOSITION` | string, nullable | Agent wrap-up code, LOB specific (Sales: Sale/NoSale/CallbackScheduled/Info/NotInterested; Retention: Saved/Cancelled/Downgraded/OfferDeclined/Info; CustomerService: Resolved/Escalated/FollowUp/Info; TechSupport: Resolved/Escalated/Dispatch/FollowUp/Info; Billing: PaymentTaken/Adjusted/Disputed/Info/Escalated; Collections: PromiseToPay/Paid/Refused/NoContact/Dispute). `Transferred` on legs that were transferred out, `LeftMessage` on answering-machine outbound legs. Null when no agent handled a customer. |
+| `DISPOSITION` | string, nullable | Agent wrap-up code = the primary `BUSINESS_RESULT` of the leg in `interaction_outcome_fact` (LOB specific, see that table: Sales Sale/NoSale/CallbackScheduled/Info/NotInterested; Retention Saved/Cancelled/Downgraded/OfferDeclined/NoChange/PendingDecision; CustomerService Resolved/FollowUp/Escalated/Info/Unresolved; TechSupport Resolved/Escalated/Dispatch/FollowUp/Info/Unresolved; Billing PaymentTaken/Adjusted/Disputed/Info/Escalated; Collections PromiseToPay/Paid/Refused/Dispute/Hardship/NoChange). Legs without an outcome row: `Transferred` on legs that were transferred out, `Assisted` on the joined agent of a conference, `LeftMessage` on answering-machine outbound legs. Null when no agent handled a customer (abandons, IVR, system drops, unanswered outbound). |
 | `CAMPAIGN_NAME` | string, nullable | Dialer campaign for outbound dialer legs. |
 
 ### Timing
@@ -67,8 +94,8 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | Column | Type | Description |
 |---|---|---|
 | `ROUTE_POINT` | string, nullable | Route point DN the call entered on (`RP_8001`…). For overflowed calls this is the *original* VQ's route point. Null for direct DID / outbound manual / internal. |
-| `DNIS` | string, nullable | Number dialled: the VQ's toll-free DNIS for inbound, the agent DID for direct calls / consults / internal, the customer number for outbound. |
-| `ANI` | string, nullable | Calling number: the customer's ANI for inbound, the site outbound CLI (or VQ DNIS for callbacks) for outbound, the initiating agent id for consult legs, agent DID for internal. |
+| `DNIS` | string | Number dialled: the VQ's toll-free DNIS for inbound, the agent DID for direct calls / consults / internal, the customer number for outbound, the external number for external legs. |
+| `ANI` | string | Calling number: the customer's ANI for inbound, the site outbound CLI (or VQ DNIS for callbacks) for outbound, the initiating agent id for consult legs, agent DID for internal. |
 | `QUEUE_ID` | string, nullable | ACD queue DN behind the VQ (`9001`…). |
 | `QUEUE_NAME` | string, nullable | ACD queue name (`Q_SALES_NEW`…). |
 | `VQ_ID` | int32, nullable | Virtual queue id (`3001`…). |
@@ -121,35 +148,174 @@ One row per resource leg of a voice interaction (see README §3 for the grain). 
 | `N_AGENT` | int8 | Agent parties on the leg: 0 (queue / IVR / external / dialer drop), 1 (normal), 2 (consult, conference, internal). |
 | `N_CUSTOMER` | int8 | Customer parties on the leg: 1 for customer-facing legs and connected outbound, 0 for consults, internal calls and unconnected outbound attempts. |
 
+## interaction_outcome_fact
+
+Business outcomes recorded by agents on handled customer calls – the "what happened for the
+business" companion of the resource fact (in a real Info Mart this lives in
+`INTERACTION_DESCRIPTOR.BUSINESS_RESULT` / attached user data and in the CRM). One row per outcome;
+every **handled customer leg** (agent connected with a customer: answered inbound, warm-transfer
+received, conference initiator, direct DID, connected outbound / dialer / callback) has exactly
+one primary outcome (`OUTCOME_SEQ`=1) and optionally one `CrossSell` secondary (`OUTCOME_SEQ`=2).
+Legs that were transferred out, consult legs, internal calls, abandons, IVR legs, system drops and
+unconnected outbound attempts have no outcome. Partitioned like the fact (`call_date=`), same
+timestamp conventions. Join on `IRF_ID` (one-to-many) or `ROOT_INTERACTION_ID` (whole call).
+
+### Identity and join keys
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_ID` | int64 | Surrogate key, unique across the run. |
+| `IRF_ID` | int64 | The agent leg the outcome was recorded on (`interaction_resource_fact.IRF_ID`). |
+| `CALL_ID`, `INTERACTION_ID`, `ROOT_INTERACTION_ID`, `CALL_DATE` | | Copied from the leg for convenient joins / partition pruning. |
+| `OUTCOME_SEQ` | int8 | 1 = primary outcome (equals the leg's `DISPOSITION`), 2 = secondary `CrossSell`. |
+
+### Timing
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_TIME` | timestamp | When the outcome happened. Monetary outcomes (order placed, payment taken, save offer accepted, cancellation processed) occur **inside the conversation**, 50–97 % of the way between `ANSWER_TIME` and `END_TIME`; other outcomes are coded at wrap-up (= `RECORDED_TIME`) except a configurable share (`in_call_event_prob`, 35 %) that also falls inside the call. Always ≥ the leg's `ANSWER_TIME`. |
+| `OUTCOME_TIME_UTC` | timestamp (UTC) | Same instant in UTC. |
+| `RECORDED_TIME` | timestamp | When the agent coded the outcome: inside the after-call work window (`END_TIME` … `ACW_END_TIME`), or at `END_TIME` when the leg has no ACW. Always ≥ `OUTCOME_TIME`. |
+| `IN_CALL_FLAG` | int8 | 1 when `OUTCOME_TIME` lies inside the talk (≤ `END_TIME`). |
+
+### Context (denormalised from the leg)
+
+| Column | Type | Description |
+|---|---|---|
+| `CALL_TYPE`, `SCENARIO`, `LOB`, `VQ_NAME`, `CAMPAIGN_NAME`, `ROUTING_METHOD` | | As on the leg. `LOB` is the LOB whose outcome catalogue was used (VQ's LOB, or the agent's LOB for direct / manual outbound). |
+| `AGENT_ID`, `AGENT_NAME`, `AGENT_GROUP`, `AGENT_TENURE_BAND`, `SITE` | | The agent who recorded the outcome (= the leg's agent). |
+| `AGENT_PBR_SCORE` | float32 | The agent's PBR score (percentile 0–1) on **every** row, regardless of routing method – the agent effect on outcomes is driven by the same latent quality, so this is the column to correlate conversion with. |
+| `CUSTOMER_ID`, `CUSTOMER_SEGMENT` | | The customer. |
+| `QUEUE_TIME`, `TALK_TIME`, `HANDLE_TIME` | int32 | Copied from the leg so wait / handle-time effects can be analysed without a join. |
+
+### The outcome
+
+| Column | Type | Description |
+|---|---|---|
+| `OUTCOME_CATEGORY` | string | Roll-up: `Sale`, `Retention`, `Churn`, `Service`, `Escalation`, `Billing`, `Collections`, `FollowUp`, `NoChange`. |
+| `BUSINESS_RESULT` | string | The outcome code (LOB catalogue in `lobs[].business_outcomes`). Defaults – **Sales**: `Sale`, `NoSale`, `CallbackScheduled`, `Info`, `NotInterested`; **Retention**: `Saved`, `Cancelled`, `Downgraded`, `OfferDeclined` (kept the plan, refused the offer), `NoChange` (enquiry only), `PendingDecision`; **CustomerService**: `Resolved`, `FollowUp`, `Escalated`, `Info`, `Unresolved`; **TechSupport**: `Resolved`, `Escalated`, `Dispatch`, `FollowUp`, `Info`, `Unresolved`; **Billing**: `PaymentTaken`, `Adjusted`, `Disputed`, `Info`, `Escalated`; **Collections**: `PromiseToPay`, `Paid`, `Refused`, `Dispute`, `Hardship`, `NoChange`; plus `CrossSell` on secondary rows of any LOB. |
+| `OUTCOME_SUBTYPE` | string, nullable | Detail of the outcome: product sold (`Mobile_Postpaid`, `Broadband_Fibre`, `TV_Bundle` …), save offer (`Discount`, `PlanChange`, `FreeMonths` …), cancel reason (`Price`, `Competitor`, `ServiceIssues` …), resolution (`Reset`, `ConfigFix` …), payment method (`Card`, `BankTransfer`), escalation target, cross-sell product (`DeviceInsurance`, `StreamingAddOn` …). Null for outcomes without subtypes. |
+| `OUTCOME_POLARITY` | string | `Positive` (sale, save, resolved, payment, promise, credit), `Neutral` (info, no change, follow-up, downgrade, dispatch), `Negative` (no sale, cancelled, offer declined, escalated, unresolved, dispute, refused). |
+| `OFFER_MADE_FLAG` | int8 | An offer was presented to the customer (probability per outcome, e.g. always on `Sale` / `NoSale` / `OfferDeclined`). |
+| `AMOUNT_TYPE` | string, nullable | `Revenue` (sale / cross-sell value), `MRR_Retained` (monthly revenue saved), `MRR_Lost` (cancelled or downgraded monthly revenue), `Payment` (payment taken), `Credit` (adjustment granted), `Promise` (promise-to-pay amount). Null when the outcome carries no money. |
+| `AMOUNT` | float64, nullable | Positive amount in `CURRENCY`, log-normal per outcome (e.g. Sale median 65, Payment median 120, MRR 85); the direction is given by `AMOUNT_TYPE`. Present iff `AMOUNT_TYPE`. |
+| `CURRENCY` | string, nullable | `USD` by default (`outcomes.currency`). |
+| `FOLLOW_UP_FLAG` | int8 | A case / task was created (scheduled callbacks, pending decisions, escalations, disputes, dispatches, promises to pay, hardship referrals). |
+| `CASE_ID` | string, nullable | Case / ticket id (`CS10000001`…), present iff `FOLLOW_UP_FLAG`. |
+| `FOLLOW_UP_DUE_TIME` | timestamp, nullable | When the follow-up is due: 1–5 days after `RECORDED_TIME` at a business hour (09:00–18:00 local); 3–14 days for promises to pay (the promise date). |
+
+How outcomes are drawn: each LOB has a catalogue of outcomes with baseline weights; per call the
+weights are bent in log-odds space by the **agent's** latent quality (`agent_lift`, e.g. +0.6 for
+`Sale`, −0.5 for `Cancelled`), by the **customer segment** (`segment_lift`, VIP +0.35 on Positive
+outcomes) and by the **wait** the customer endured (`wait_penalty_per_min`, −0.12 per minute
+beyond the first on Positive outcomes). Calls with the `short` handling outcome (4–30 s talk) never
+produce Positive or monetary outcomes. Because PBR queues route disproportionately to
+high-quality agents, PBR-routed Sales/Retention calls convert visibly better than ACD-routed ones,
+and conversion rises monotonically with `AGENT_PBR_SCORE` (see README §6).
+
 ## Dimension tables
 
+Written once per run as single Parquet files (`write_dimensions: true`). They are the reference
+data the facts were generated from, so every fact key resolves.
+
 ### dim_site
-`SITE`, `COUNTRY`, `OFFSHORE_FLAG`, `OUTBOUND_CLI`.
+
+One row per contact-centre site. Primary key `SITE`.
+
+| Column | Type | Description |
+|---|---|---|
+| `SITE` | string | Site name. Joins `interaction_resource_fact.SITE`, `interaction_outcome_fact.SITE`, `dim_agent.SITE`, `dim_vq.HOME_SITE`. |
+| `COUNTRY` | string | ISO country code (`US`, `CA`, `PH` ...). |
+| `OFFSHORE_FLAG` | int8 | 1 for offshore sites; they staff most of the night shifts. |
+| `OUTBOUND_CLI` | string | Caller id presented on outbound calls from this site (`ANI` of manual / dialer outbound legs). |
 
 ### dim_lob
-`LOB`, `LOB_SHORT`.
+
+One row per line of business. Primary key `LOB`.
+
+| Column | Type | Description |
+|---|---|---|
+| `LOB` | string | Line of business (`Sales`, `Retention`, `CustomerService`, `TechSupport`, `Billing`, `Collections`). Joins `LOB` on both facts, `dim_vq.LOB`, `dim_agent.LOB`. Also the key of the `lobs` config section (outcome catalogue, transfer targets). |
+| `LOB_SHORT` | string | Short code used in `AGENT_GROUP` names (`SAL`, `RET`, `CS`, `TEC`, `BIL`, `COL`). |
 
 ### dim_vq
-`VQ_ID`, `VQ_NAME`, `QUEUE_ID`, `QUEUE_NAME`, `ROUTE_POINT`, `DNIS`, `LOB`, `SKILL`, `HOME_SITE`,
-`OPEN_HOUR`, `CLOSE_HOUR` (24 = midnight; 0/24 = 24x7), `OPEN_DAYS` (`Mon-Sun` / `Mon-Sat` / `Mon-Fri`),
-`SERVICE_LEVEL_S`, `OVERFLOW_VQ_NAME`, `ROUTING_METHOD` (`ACD`/`PBR`), `PBR_ENABLED_FLAG`, `PBR_SKEW`
-(log-normal sigma of agent weights, null for ACD queues), `ROSTER_SIZE` (agents skilled for the VQ),
-`EXPECTED_AHT_S`.
+
+One row per virtual queue. Primary key `VQ_ID` (`VQ_NAME` is unique too).
+
+| Column | Type | Description |
+|---|---|---|
+| `VQ_ID` | int32 | Virtual queue id. Joins `interaction_resource_fact.VQ_ID`. |
+| `VQ_NAME` | string | Virtual queue name. Joins `VQ_NAME`, `ORIGINAL_VQ_NAME`, `TRANSFER_TO` (VQ transfers) on the fact and the key of `vq_overrides` in the config. |
+| `QUEUE_ID` | string | ACD queue DN behind the VQ. |
+| `QUEUE_NAME` | string | ACD queue name. |
+| `ROUTE_POINT` | string | Route point DN calls to this VQ enter on. |
+| `DNIS` | string | Toll-free number dialled to reach this VQ. |
+| `LOB` | string | Line of business. |
+| `SKILL` | string | Skill expression required to take calls from the VQ. |
+| `HOME_SITE` | string | Site reported on queue legs that never reached an agent (abandons, callback requests). |
+| `OPEN_HOUR` | int8 | Local opening hour (0–23). |
+| `CLOSE_HOUR` | int8 | Local closing hour (1–24; 24 = midnight; `OPEN_HOUR` 0 / `CLOSE_HOUR` 24 = 24x7). Calls outside the window become `AfterHours`. |
+| `OPEN_DAYS` | string | `Mon-Sun`, `Mon-Sat` or `Mon-Fri`. |
+| `SERVICE_LEVEL_S` | int16 | Service-level threshold in seconds used to compute `SERVICE_LEVEL_FLAG`. |
+| `OVERFLOW_VQ_NAME` | string, nullable | Backup VQ that calls overflow to after `overflow_wait_s`; null when the VQ has none. |
+| `ROUTING_METHOD` | string | `ACD` (longest idle, uniform across agents) or `PBR` (Predictive Behavioural Routing, skewed towards high-scoring agents). |
+| `PBR_ENABLED_FLAG` | int8 | 1 when the VQ uses PBR. |
+| `PBR_SKEW` | float32, nullable | Strength of the PBR skew: agent weight = exp(`PBR_SKEW` × agent quality z-score), i.e. the log-normal sigma of agent weights (0 = uniform, 1.2 = extreme). Null for ACD queues. |
+| `ROSTER_SIZE` | int32 | Number of agents skilled for the VQ (primary or secondary skill). |
+| `EXPECTED_AHT_S` | float32 | Expected average handle time in seconds (talk + expected hold + ACW) used by the staffing model. |
 
 ### dim_agent
-`AGENT_ID`, `AGENT_NAME`, `AGENT_GROUP`, `SITE`, `LOB`, `AGENT_TENURE_BAND`, `PRIMARY_VQ_NAME`,
-`SKILLS` (pipe separated), `SHIFT_START_HOUR`, `SHIFT_LEN_H`, `DAYS_OFF` (pipe separated weekday
-names), `SPEED_FACTOR` (multiplier on talk / ACW), `PBR_SCORE` (percentile rank 0–1 of the agent's
-predicted-outcome quality; drives how often PBR queues pick the agent), `AGENT_DID`.
+
+One row per agent. Primary key `AGENT_ID`.
+
+| Column | Type | Description |
+|---|---|---|
+| `AGENT_ID` | string | Employee id. Joins `AGENT_ID` on both facts and `TRANSFER_TO` (agent transfers). |
+| `AGENT_NAME` | string | Display name. |
+| `AGENT_GROUP` | string | Team, `{LOB_SHORT}_{SITE}_TEAMnn`. |
+| `SITE` | string | Site the agent works from. |
+| `LOB` | string | Line of business of the agent's primary skill. |
+| `AGENT_TENURE_BAND` | string | `<3m`, `3-12m`, `1-3y`, `3y+`. Newer agents are slower (`SPEED_FACTOR`) and have lower PBR quality on average. |
+| `PRIMARY_VQ_NAME` | string | VQ of the agent's primary skill. |
+| `SKILLS` | string | Pipe-separated skill expressions the agent carries (primary plus an optional secondary skill in the same LOB). |
+| `SHIFT_START_HOUR` | int8 | Local hour the shift starts (0–23). |
+| `SHIFT_LEN_H` | float32 | Shift length in hours. |
+| `DAYS_OFF` | string | Pipe-separated weekday names the agent does not work. |
+| `SPEED_FACTOR` | float32 | Multiplier applied to the agent's talk and ACW times (1.0 = average). |
+| `PBR_SCORE` | float32 | Percentile rank (0–1) of the agent's latent quality. Drives how often PBR queues pick the agent (`PBR_SCORE` on the fact) and the agent effect on business outcomes (`AGENT_PBR_SCORE` on the outcome fact). |
+| `AGENT_DID` | string | Direct-dial number (`DNIS` of direct / consult / internal legs). |
 
 ### dim_customer
-`CUSTOMER_ID`, `ANI`, `CUSTOMER_SEGMENT`.
+
+One row per customer in the pool. Primary key `CUSTOMER_ID`.
+
+| Column | Type | Description |
+|---|---|---|
+| `CUSTOMER_ID` | string | Customer key. Joins `CUSTOMER_ID` on both facts. |
+| `ANI` | string | Phone number (`ANI` of the customer's inbound legs, `DNIS` of outbound legs to them). |
+| `CUSTOMER_SEGMENT` | string | `Consumer`, `SMB`, `Enterprise` or `VIP`; drives the outcome `segment_lift` and the share of premium routing. |
+
+## _data_dictionary.csv
+
+Machine-readable version of this document, written next to the data on every run and printable
+with `python -m gim_synth dictionary`. One row per column of every table:
+
+| Column | Description |
+|---|---|
+| `TABLE_NAME` | One of the 7 tables above. |
+| `TABLE_DESCRIPTION` | Grain of the table. |
+| `COLUMN_NAME` | Column name. |
+| `ORDINAL` | 1-based position in the Parquet schema. |
+| `DATA_TYPE` | Arrow type as written (`int64`, `string`, `timestamp[ms]`, `timestamp[ms, tz=UTC]`, `date32[day]` ...). |
+| `NULLABLE` | `yes` / `no` — whether the column can be null in generated data. |
+| `DESCRIPTION` | Column definition. |
 
 ## _manifest.json
 
 `generated_at`, `config` (effective configuration), `roster_size`, `vq_count`, `rows`,
-`interactions`, `elapsed_s`, `dropped_callbacks_after_period`, `call_result_counts`,
-`call_type_counts`, `scenario_counts`, `days[]` (`date`, `label`, `base_volume`, `arrivals`,
-`legs`, `interactions`, `abandon_pct`, `service_level_pct`, `peak_calls_per_min`,
-`min_calls_per_min_daytime`, `events[]` with the bursts / mega bursts / lulls / day events of that
-day), `files[]`.
+`interactions`, `outcome_rows`, `elapsed_s`, `dropped_callbacks_after_period`, `call_result_counts`,
+`call_type_counts`, `scenario_counts`, `business_result_counts` (`LOB:BUSINESS_RESULT` → count),
+`outcome_polarity_counts`, `amount_totals_by_type`, `days[]` (`date`, `label`, `base_volume`,
+`arrivals`, `legs`, `interactions`, `abandon_pct`, `service_level_pct`, `peak_calls_per_min`,
+`min_calls_per_min_daytime`, `outcomes`, `positive_outcome_pct`, `events[]` with the bursts / mega
+bursts / lulls / day events of that day), `files[]`.

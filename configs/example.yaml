@@ -38,8 +38,13 @@ vq_weights:
 
 # Predictive Behavioural Routing: PBR queues route disproportionately to high-scoring agents.
 # Any VQConfig field can be overridden per queue here.
+# Per-queue behaviour knobs (null / omitted = use the global `inbound` / `ivr` values):
+#   short_abandon_prob, abandon_while_ringing_prob, rona_prob, ivr_contained_prob, wait_scale
+# See configs/full_config.yaml for the complete annotated list of every parameter.
 vq_overrides:
-  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5}
+  VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.5,   # L1: PBR on, impatient callers
+                  patience_median_s: 90, short_abandon_prob: 0.03, rona_prob: 0.04}
+  VQ_Tech_Tier2: {patience_median_s: 400, wait_scale: 1.5, service_level_s: 90} # L2: slow but patient
   VQ_Retention_Cancel: {pbr_skew: 1.2}      # even more concentrated than the default 1.0
 
 inbound:
@@ -47,6 +52,17 @@ inbound:
   rona_prob: 0.025
   callback_offer_wait_s: 180
   callback_accept_prob: 0.4
+
+# Business outcomes (interaction_outcome_fact): how strongly the agent, the customer segment and
+# the wait the customer endured bend the sale / save / resolve probabilities. The outcome
+# catalogue itself (Sale, Saved, Cancelled, NoChange, amounts, products ...) is per LOB in
+# `lobs[].business_outcomes` – see configs/full_config.yaml; overriding `lobs` replaces the list.
+outcomes:
+  agent_effect_scale: 1.3     # star agents matter more than in the defaults (0 = agent-independent)
+  wait_penalty_per_min: 0.2   # long waits hurt conversion harder
+  segment_lift: {Consumer: 0.0, SMB: 0.1, Enterprise: 0.3, VIP: 0.5}
+  cross_sell_prob: 0.08       # more add-on sales on service calls
+  follow_up_days: [1, 3]
 
 output:
   directory: ./out_example

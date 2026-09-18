@@ -133,3 +133,64 @@ def new_row() -> Dict[str, Any]:
     row["SERVICE_LEVEL_FLAG"] = None
     row["MEDIA_TYPE"] = "voice"
     return row
+
+
+# --------------------------------------------------------------------------- #
+# INTERACTION_OUTCOME_FACT: business outcomes recorded on handled customer legs
+# --------------------------------------------------------------------------- #
+OUTCOME_COLUMNS: Dict[str, pa.DataType] = {
+    # ---- identity / join keys to interaction_resource_fact ----
+    "OUTCOME_ID": pa.int64(),
+    "IRF_ID": pa.int64(),
+    "CALL_ID": pa.string(),
+    "INTERACTION_ID": pa.int64(),
+    "ROOT_INTERACTION_ID": pa.int64(),
+    "CALL_DATE": pa.date32(),
+    "OUTCOME_SEQ": pa.int8(),
+    # ---- when ----
+    "OUTCOME_TIME": TS,
+    "OUTCOME_TIME_UTC": TS_UTC,
+    "RECORDED_TIME": TS,
+    "IN_CALL_FLAG": pa.int8(),
+    # ---- context (denormalised from the leg) ----
+    "CALL_TYPE": pa.string(),
+    "SCENARIO": pa.string(),
+    "LOB": pa.string(),
+    "VQ_NAME": pa.string(),
+    "CAMPAIGN_NAME": pa.string(),
+    "ROUTING_METHOD": pa.string(),
+    "AGENT_ID": pa.string(),
+    "AGENT_NAME": pa.string(),
+    "AGENT_GROUP": pa.string(),
+    "AGENT_TENURE_BAND": pa.string(),
+    "AGENT_PBR_SCORE": pa.float32(),
+    "SITE": pa.string(),
+    "CUSTOMER_ID": pa.string(),
+    "CUSTOMER_SEGMENT": pa.string(),
+    "QUEUE_TIME": pa.int32(),
+    "TALK_TIME": pa.int32(),
+    "HANDLE_TIME": pa.int32(),
+    # ---- the outcome ----
+    "OUTCOME_CATEGORY": pa.string(),
+    "BUSINESS_RESULT": pa.string(),
+    "OUTCOME_SUBTYPE": pa.string(),
+    "OUTCOME_POLARITY": pa.string(),
+    "OFFER_MADE_FLAG": pa.int8(),
+    "AMOUNT_TYPE": pa.string(),
+    "AMOUNT": pa.float64(),
+    "CURRENCY": pa.string(),
+    "FOLLOW_UP_FLAG": pa.int8(),
+    "CASE_ID": pa.string(),
+    "FOLLOW_UP_DUE_TIME": TS,
+}
+
+OUTCOME_SCHEMA = pa.schema([pa.field(n, t, nullable=True) for n, t in OUTCOME_COLUMNS.items()])
+
+
+def new_outcome_row() -> Dict[str, Any]:
+    row: Dict[str, Any] = dict.fromkeys(OUTCOME_COLUMNS, None)
+    for c in ("IN_CALL_FLAG", "OFFER_MADE_FLAG", "FOLLOW_UP_FLAG"):
+        row[c] = 0
+    # relative-seconds temporaries consumed by the writer
+    row["_outcome"] = row["_recorded"] = row["_follow_up"] = None
+    return row

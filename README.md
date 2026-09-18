@@ -8,7 +8,8 @@ It is meant for building and testing reporting, analytics, forecasting and data-
 without touching production data.
 
 * Any date range (a month by default, a year works the same way), configurable timezone
-* 30 000+ interactions per weekday by default, ~1.3 M fact rows for a 31-day month in under a minute
+* 30 000+ interactions per weekday by default, ~1.3 M fact rows plus ~0.7 M outcome rows for a
+  31-day month in about a minute
 * Realistic arrival patterns **plus** extreme behaviour: flash-crowd bursts where thousands of calls
   hit in a few minutes, and lulls where the phones go dead
 * Queue dynamics that react to load: waits, abandons, service level and callback offers all degrade
@@ -21,18 +22,24 @@ without touching production data.
 * Unbalanced queues (monster VQs plus a long tail of niche ones) and **Predictive Behavioural
   Routing** on the sales/retention queues, so call distribution across agents is lopsided
   (`ROUTING_METHOD`, `PBR_SCORE`)
+* **Business outcomes** for every handled call in a companion `interaction_outcome_fact` table:
+  sale / no sale, saved / cancelled / downgraded / no change, resolved / escalated / follow-up,
+  payment taken / promise to pay …, with amounts, products and reasons, cases and due dates,
+  timestamps inside the call or at wrap-up, and probabilities that depend on the agent's quality,
+  the customer segment and how long the customer waited (so PBR queues visibly out-convert ACD)
 * Full lineage keys for multi-leg interactions: `INTERACTION_ID`, `ROOT_INTERACTION_ID`,
   `PARENT_INTERACTION_ID` / `PARENT_CALL_ID` (consults), `RELATED_INTERACTION_ID` (callbacks),
   `PREVIOUS_CALL_ID` and a tree-wide `SEGMENT_SEQ`
-* Deterministic for a given seed; every row is checked against ~35 invariants before it is written
+* Deterministic for a given seed; every row is checked against ~55 invariants (legs, outcomes and
+  their join) before it is written
 
 Documentation:
 
 | Document | Contents |
 |---|---|
 | this README | concepts, quick start, configuration, model description, output layout |
-| [docs/DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | every column of the fact table and the dimension tables |
-| [docs/SCENARIOS.md](docs/SCENARIOS.md) | every scenario the generator produces and exactly how it is encoded |
+| [docs/DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | the 7 output tables, their relationships and every column (2 facts, 5 dimensions); also emitted as `_data_dictionary.csv` |
+| [docs/SCENARIOS.md](docs/SCENARIOS.md) | every scenario the generator produces and exactly how it is encoded, incl. the business-outcome model (§11) |
 
 ---
 
@@ -55,6 +62,9 @@ python -m gim_synth print-config
 
 # quick statistics of a generated dataset
 python -m gim_synth summarize --out ./out
+
+# data dictionary of all 7 tables (markdown; --format csv, --table dim_vq to narrow)
+python -m gim_synth dictionary
 
 python -m pytest -q                       # tests
 ```
@@ -82,24 +92,37 @@ out/
 │   ├── call_date=2026-08-01/part-0.parquet      # hive-style partition per CALL_DATE
 │   ├── call_date=2026-08-02/part-0.parquet
 │   └── ...
+├── interaction_outcome_fact/                     # business outcomes of handled calls, same partitioning
+│   ├── call_date=2026-08-01/part-0.parquet      # join on IRF_ID (or ROOT_INTERACTION_ID)
+│   └── ...
 ├── dim_site.parquet
 ├── dim_lob.parquet
 ├── dim_vq.parquet                                # queues / virtual queues / route points / DNIS
 ├── dim_agent.parquet                             # roster incl. shift, skills, days off
 ├── dim_customer.parquet                          # customer ids, ANI, segment
+├── _data_dictionary.csv                          # table / column / type / nullable / description, all 7 tables
 └── _manifest.json                                # effective config, per-day stats & events, counts
 ```
+
+Seven tables in total: two facts (`interaction_resource_fact`, `interaction_outcome_fact`) and
+five dimensions (`dim_site`, `dim_lob`, `dim_vq`, `dim_agent`, `dim_customer`), 158 columns
+altogether. The dictionary is generated from the Arrow schemas by `gim_synth/dictionary.py`
+and a test fails if any column lacks a description.
 
 Read it with anything that speaks Parquet, e.g.
 
 ```python
 import pyarrow.dataset as ds
 t = ds.dataset("out/interaction_resource_fact", format="parquet", partitioning="hive").to_table()
+o = ds.dataset("out/interaction_outcome_fact", format="parquet", partitioning="hive").to_table()
+sales = o.filter(pc.equal(o["BUSINESS_RESULT"], "Sale")).join(t, keys="IRF_ID")   # outcome + leg
 ```
 
 The `_manifest.json` lists for each day the base volume, the realised arrivals, legs, interactions,
-abandon %, service-level %, peak calls-per-minute and the random **events** that shaped the day
-(bursts, mega bursts, lulls, spike/quiet days) so you can find the interesting days quickly.
+abandon %, service-level %, peak calls-per-minute, outcome count / positive-outcome % and the
+random **events** that shaped the day (bursts, mega bursts, lulls, spike/quiet days) so you can
+find the interesting days quickly; run-level counts by business result and amount totals by type
+are included too.
 
 ---
 
@@ -237,21 +260,63 @@ Times are stored to the second. `ARRIVE_TIME` etc. are naive local business time
 `ARRIVE_TIME_UTC` is the UTC instant (computed from the day's midnight offset; on a DST switch day
 legs after the switch are off by one hour).
 
-### 4.6 Validation (`gim_synth/validate.py`)
+### 4.6 Business outcomes (`interaction_outcome_fact`)
+
+Once a leg's timing is known, every leg on which an agent spoke with a customer draws a
+**business outcome** from its LOB's catalogue (`lobs[].business_outcomes`): Sales `Sale` / `NoSale` /
+`CallbackScheduled` / `Info` / `NotInterested`; Retention `Saved` / `Cancelled` / `Downgraded` /
+`OfferDeclined` / `NoChange` / `PendingDecision`; Service and Tech `Resolved` / `FollowUp` /
+`Escalated` / `Dispatch` / `Info` / `Unresolved`; Billing `PaymentTaken` / `Adjusted` / `Disputed` /
+…; Collections `PromiseToPay` / `Paid` / `Refused` / `Dispute` / `Hardship` / `NoChange`. The outcome
+becomes the leg's `DISPOSITION` and one row in the outcome table with:
+
+* `OUTCOME_CATEGORY` / `BUSINESS_RESULT` / `OUTCOME_SUBTYPE` (product sold, save offer, cancel
+  reason, resolution type, payment method …) / `OUTCOME_POLARITY` (Positive / Neutral / Negative)
+* money: `AMOUNT_TYPE` (`Revenue`, `MRR_Retained`, `MRR_Lost`, `Payment`, `Credit`, `Promise`),
+  `AMOUNT`, `CURRENCY`; `OFFER_MADE_FLAG`
+* follow-ups: `FOLLOW_UP_FLAG`, `CASE_ID`, `FOLLOW_UP_DUE_TIME` (1–5 days later at a business
+  hour; 3–14 days for promises to pay)
+* timestamps: `OUTCOME_TIME` (monetary events happen inside the conversation, others at wrap-up)
+  and `RECORDED_TIME` (inside the ACW window), both reconciled with the leg's
+  `ANSWER_TIME` / `END_TIME` / `ACW_END_TIME`
+* who / where: agent (plus `AGENT_PBR_SCORE` on every row), site, group, tenure, VQ, LOB,
+  routing method, campaign, customer and segment, plus `QUEUE_TIME` / `TALK_TIME` / `HANDLE_TIME`
+  copied from the leg
+* an optional secondary `CrossSell` outcome (`OUTCOME_SEQ`=2, 5 % baseline)
+
+The draw is **not independent of the call**: weights are shifted in log-odds space by the agent's
+latent quality (`agent_lift`: good agents sell and save more, escalate and lose customers less),
+by the customer segment (`segment_lift`) and by how long the customer waited
+(`wait_penalty_per_min`); `short` calls never sell. Because PBR routes to the better agents, PBR
+queues out-convert ACD queues, and conversion rises monotonically with `AGENT_PBR_SCORE` – the
+kind of structure you want when testing agent-performance, routing-ROI or churn analytics.
+Transferred-out legs, consults, conference joiners, abandons and unconnected outbound attempts
+carry no outcome. See docs/SCENARIOS.md §11 and the `outcomes` section of `configs/full_config.yaml`.
+
+### 4.7 Validation (`gim_synth/validate.py`)
 
 Before a day is written, ~35 invariants are asserted on the Arrow table (unique ids, timestamp
 ordering, `DURATION`/`HANDLE_TIME` arithmetic, abandon/answer exclusivity, lineage rules such as
 "`SEGMENT_SEQ`>1 ⇒ `PREVIOUS_CALL_ID` set" and "`PARENT_INTERACTION_ID` only on Consult legs",
-resource semantics, service-level flag consistency). A violation aborts the run with the failing
-checks listed (`--no-validate` skips this).
+resource semantics, service-level flag consistency), plus ~20 on the outcome table and its join to
+the legs (every outcome hangs off exactly one answered agent leg, primary result = `DISPOSITION`,
+`ANSWER_TIME ≤ OUTCOME_TIME ≤ RECORDED_TIME ≤ ACW_END_TIME`, amount / case field consistency). A
+violation aborts the run with the failing checks listed (`--no-validate` skips this).
 
 ---
 
 ## 5. Configuration
 
-`python -m gim_synth print-config` dumps every knob with its default. A YAML passed with
-`--config` is deep-merged over the defaults; CLI flags win over both. Lists (`sites`, `lobs`,
-`vqs`) are replaced wholesale when present. Unknown keys raise an error.
+**[`configs/full_config.yaml`](configs/full_config.yaml)** is the complete, annotated reference:
+every knob with its default value, a one-line explanation and a tuning cheat-sheet at the top
+(abandons, bursts, PBR, L1/L2 tech support, transfers, volume split). It loads to exactly the
+defaults (guarded by a test), so copy it and change what you need. `configs/example.yaml` is a
+shorter override-only example.
+
+`python -m gim_synth print-config` dumps the effective configuration (defaults + your file) as
+plain YAML. A YAML passed with `--config` is deep-merged over the defaults; CLI flags win over
+both. Lists (`sites`, `lobs`, `vqs`) are replaced wholesale when present. Unknown keys raise an
+error.
 
 | Section | Purpose |
 |---|---|
@@ -265,8 +330,9 @@ checks listed (`--no-validate` skips this).
 | `staffing` | occupancy, roster factor, shift length, secondary skill rate, minimum agents per open hour |
 | `outbound` | manual and dialer result mixes, campaigns, internal / DID answer rates |
 | `customers` | pool size, repeat-caller skew, segment mix |
+| `outcomes` | business-outcome effects: `agent_effect_scale`, `wait_penalty_per_min`, `segment_lift`, cross-sell probability and definition, in-call event share, follow-up / promise due windows, currency, `enabled` |
 | `output` | directory, compression, partitioning, dimensions, validation |
-| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per VQ `pbr_enabled`, `pbr_skew`, `pbr_premium_boost` control predictive routing |
+| `sites`, `lobs`, `vqs` | the reference model – add / rename / retune queues and LOBs here; per LOB: `business_outcomes` (outcome catalogue with weight, polarity, category, `agent_lift`, offer / follow-up probabilities, amount type and distribution, subtypes), `outcome_weights` (call-handling path), `transfer_targets`; per VQ: hours, AHT, holds, ACW, base ASA, patience, SL threshold, overflow, `pbr_enabled` / `pbr_skew` / `pbr_premium_boost`, and optional per-queue overrides `short_abandon_prob`, `abandon_while_ringing_prob`, `rona_prob`, `ivr_contained_prob`, `wait_scale` |
 | `vq_weights` | shortcut `{VQ name: relative weight}` to reshape the volume split without re-declaring `vqs` |
 | `vq_overrides` | shortcut `{VQ name: {field: value}}` to change any per-VQ field (e.g. `pbr_enabled`, hours, AHT) without re-declaring `vqs` |
 
@@ -294,6 +360,19 @@ vq_overrides:
   VQ_Sales_New: {pbr_enabled: false}
   VQ_Billing_Payments: {close_hour: 23, service_level_s: 30}
 
+# L1 vs L2 tech support: impatient L1 callers with more short abandons and RONA,
+# patient L2 callers on a slow, long-AHT queue
+vq_overrides:
+  VQ_Tech_Tier1: {patience_median_s: 90, short_abandon_prob: 0.03, rona_prob: 0.04}
+  VQ_Tech_Tier2: {patience_median_s: 400, wait_scale: 1.5, talk_median_s: 900, service_level_s: 90}
+
+# business outcomes: stronger agent effect, harsher wait penalty, more cross-sell
+outcomes: {agent_effect_scale: 1.5, wait_penalty_per_min: 0.2, cross_sell_prob: 0.08}
+
+# a stricter retention desk: fewer saves, more cancellations (lobs is replaced wholesale, so
+# copy the LOB block from configs/full_config.yaml and edit the weights)
+#   lobs[Retention].business_outcomes: Saved.weight 0.22, Cancelled.weight 0.30 ...
+
 # one big file, no validation, gzip
 output: {partition_by_day: false, validate: false, compression: gzip}
 ```
@@ -306,7 +385,7 @@ generated, validated and written at a time; runtime is roughly 1.2 s per 30k-cal
 
 ## 6. Typical numbers (defaults, seed 42, Aug 2026)
 
-* ~1.3 M fact rows / ~1.05 M interactions for 31 days, ~90 MB zstd Parquet
+* ~1.3 M fact rows / ~1.1 M interactions / ~0.7 M outcome rows for 31 days, ~130 MB zstd Parquet
 * normal weekdays: 30–45k interactions, abandon 2–8 %, service level 60–77 %
 * burst / spike days: 80–140k interactions, peaks of 4–8k calls per minute, abandon 30–45 %,
   service level 20–40 %, thousands of callback requests
@@ -317,10 +396,17 @@ generated, validated and written at a time; runtime is roughly 1.2 s per 30k-cal
 
 * Agent load: ACD queues top-decile/bottom-decile ≈ 10×; PBR queues ≈ 30×, busiest agent 1 200+
   calls a week while the least-favoured get a handful
+* Outcomes: ≈ 0.55 outcome rows per fact row (one per handled customer leg, +5 % cross-sells);
+  ~48 % Positive / 30 % Neutral / 22 % Negative. Sales `Sale` ≈ 36 %, Retention `Saved` ≈ 41 % /
+  `Cancelled` ≈ 13 %, Service `Resolved` ≈ 45 %. Positive rate by agent PBR-score quartile
+  ≈ 33 % → 38 % → 45 % → 56 %; PBR-routed Sales/Retention ≈ 38–41 % positive vs ≈ 27 % on ACD;
+  waits over 5 minutes cut the positive rate by a quarter. Weekly amounts at 15k calls/day:
+  Revenue ≈ 560k, Payments ≈ 460k, MRR retained ≈ 400k, MRR lost ≈ 160k
 
 Run `python -m gim_synth summarize --out ./out` to see the distribution of results, resource
-roles, transfer types, LOBs, sites, the per-VQ volume / abandon / service-level table and the
-ACD-vs-PBR agent load comparison for your own output.
+roles, transfer types, LOBs, sites, the per-VQ volume / abandon / service-level table, the
+ACD-vs-PBR agent load comparison and the business-outcome breakdown (results per LOB, amounts,
+positive rate by agent score quartile / routing method / wait) for your own output.
 
 ---
 
@@ -331,5 +417,7 @@ ACD-vs-PBR agent load comparison for your own output.
 * Transfer inflow is approximated in roster sizing (+12 %) rather than fed back into the target
   VQ's load curve.
 * `ARRIVE_TIME_UTC` uses the day's midnight offset (DST switch days are off by an hour after the switch).
-* Surrogate keys (`IRF_ID`, `INTERACTION_ID`) are simple counters; `CALL_ID` is a random 64-bit hex.
+* Surrogate keys (`IRF_ID`, `INTERACTION_ID`, `OUTCOME_ID`, `CASE_ID`) are simple counters; `CALL_ID` is a random 64-bit hex.
 * Only the `voice` media type is generated.
+* Outcomes are drawn per leg; there is no customer-level state (a customer `Cancelled` today may
+  still call Retention next week), and follow-up cases are not closed by later calls.

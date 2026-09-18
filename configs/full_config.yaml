@@ -1,0 +1,560 @@
+# =====================================================================================
+#  gim_synth – FULL configuration reference
+#
+#  Every knob of the generator, with its default value and what it does.
+#  Copy this file, change what you need, then run:
+#
+#      python -m gim_synth generate --config my_config.yaml
+#
+#  Rules
+#  * Any key you leave out keeps its default (this file == the defaults exactly, so it is
+#    safe to start from).  CLI flags (--days, --calls-per-day, --seed, --out ...) win over YAML.
+#  * The lists `sites`, `lobs`, `vqs` are replaced as a whole when present. To change only a
+#    few queues use the shortcuts `vq_weights` / `vq_overrides` at the bottom instead.
+#  * All probability tables (weights, mixes, dispositions ...) are relative: they are
+#    normalised automatically, so they do not have to add up to 1.
+#  * Durations are seconds unless the name says otherwise (_h = hours, _min = minutes).
+#  * Unknown keys raise an error, so typos are caught immediately.
+#
+#  Quick tuning cheat-sheet
+#    more abandons ..........  raise queue wait (vqs[].base_asa_s, vqs[].wait_scale, or
+#                              staffing.roster_factor down), lower vqs[].patience_median_s,
+#                              raise inbound.short_abandon_prob / vqs[].short_abandon_prob
+#    fewer abandons .........  the opposite; staffing.roster_factor 1.3 gives a comfortable centre
+#    more bursts / chaos ....  bursts.rate_per_day, bursts.max_frac, bursts.mega_prob, lulls.*
+#    smooth textbook days ...  bursts.rate_per_day 0, bursts.mega_prob 0, lulls.rate_per_day 0,
+#                              day_events.*_prob 0
+#    PBR on/off / strength ..  vqs[].pbr_enabled, vqs[].pbr_skew (0 uniform … 1.2 extreme),
+#                              vqs[].pbr_premium_boost, or vq_overrides at the bottom
+#    L1 vs L2 behaviour .....  the VQ_Tech_Tier1 (L1) and VQ_Tech_Tier2 (L2) entries below:
+#                              AHT, holds, patience, SL threshold, RONA, abandons, escalation via
+#                              lobs[TechSupport].transfer_targets (L1 -> L2 share)
+#    more transfers/consults   lobs[].outcome_weights (blind_transfer, warm_transfer, consult_only,
+#                              conference, multi_hop, external_transfer)
+#    volume split ...........  vqs[].weight or vq_weights
+#    business outcomes ......  lobs[].business_outcomes (Sale / Saved / Cancelled / NoChange ... with
+#                              weights, amounts, agent_lift), outcomes.* for the agent / segment /
+#                              wait effects, cross-sell and follow-up timing
+# =====================================================================================
+
+
+# ------------------------------------------------------------------ run scope & volume
+start_date: "2026-08-01"      # first business day (YYYY-MM-DD)
+days: 31                      # number of days to generate; 7, 31, 92, 365 ... all work
+timezone: America/New_York    # IANA zone of the contact-centre business clock (local times in the data)
+seed: 42                      # any integer; same seed + same config => identical data
+calls_per_day: 30000          # baseline arrivals on a factor-1.0 weekday BEFORE bursts/spikes
+                              # (all interaction types: inbound, outbound, internal, DID)
+
+weekday_factors:              # multiplier on calls_per_day by weekday
+  Mon: 1.18
+  Tue: 1.08
+  Wed: 1.02
+  Thu: 1.0
+  Fri: 0.97
+  Sat: 0.52
+  Sun: 0.38
+daily_noise_sigma: 0.08       # log-normal sigma of day-to-day random volume noise (0 = none)
+short_abandon_threshold_s: 5  # abandons with QUEUE_TIME below this are "short abandons"
+                              # (SHORT_ABANDON_FLAG=1, excluded from service level)
+
+
+# ------------------------------------------------------------------ intraday shape
+intraday:
+  peaks:                      # gaussian mixture over the 24h clock: [hour, sigma_hours, weight]
+    - [10.5, 1.8, 0.55]       # morning peak
+    - [14.5, 2.2, 0.45]       # afternoon peak (lunch dip falls between the two)
+  night_floor: 0.04           # relative intensity floor overnight (feeds the 24x7 queues)
+  minute_jitter_shape: 25.0   # gamma shape of per-minute noise; higher = smoother curve, 5 = very spiky
+
+
+# ------------------------------------------------------------------ bursts: "a billion calls at once"
+bursts:
+  rate_per_day: 1.0           # Poisson mean number of ordinary bursts per day (0 disables)
+  min_frac: 0.03              # each burst adds min_frac..max_frac of the day's base volume ...
+  max_frac: 0.25
+  min_sigma_min: 3.0          # ... spread as a gaussian this many minutes wide (sigma)
+  max_sigma_min: 25.0
+  window: [7, 22]             # hours between which burst centres can fall
+  mega_prob: 0.05             # probability per day of a FLASH CROWD (0 disables)
+  mega_min_frac: 0.5          # flash crowd adds 0.5x..1.5x of the whole day's volume ...
+  mega_max_frac: 1.5
+  mega_sigma_min: 4.0         # ... inside roughly +/- 8 minutes => thousands of calls per minute
+
+
+# ------------------------------------------------------------------ lulls: "barely any calls"
+lulls:
+  rate_per_day: 1.0           # Poisson mean number of dead windows per day (0 disables)
+  min_len_min: 10             # window length in minutes
+  max_len_min: 60
+  min_intensity: 0.0          # multiplier on the baseline during the lull (0.0 = phones fully dead)
+  max_intensity: 0.1
+  window: [6, 23]             # hours between which lulls can start
+
+
+# ------------------------------------------------------------------ whole-day events
+day_events:
+  spike_day_prob: 0.05        # probability a day is a spike day (bill run, outage, marketing)
+  spike_min: 1.5              # spike day multiplies the whole day by spike_min..spike_max
+  spike_max: 3.0
+  quiet_day_prob: 0.04        # probability a day is a quiet day (public holiday)
+  quiet_min: 0.15
+  quiet_max: 0.5
+
+
+# ------------------------------------------------------------------ interaction type mix
+mix:                          # relative shares of arrivals by type
+  inbound: 0.86               # customer calls into a VQ (the bulk)
+  outbound_manual: 0.04       # agent dials a customer
+  outbound_dialer: 0.04       # dialer campaign attempts (see outbound.campaigns)
+  internal: 0.03              # agent-to-agent calls (2 legs each)
+  direct_did: 0.03            # customer dials an agent's DID directly (no queue)
+
+
+# ------------------------------------------------------------------ IVR
+ivr:
+  mean_s: 22.0                # IVR time before queuing: normal(mean, sd) floored at min
+  sd_s: 9.0
+  min_s: 3.0
+  contained_prob: 0.08        # share of inbound calls resolved in self-service (never queued)
+                              # per-VQ override: vqs[].ivr_contained_prob
+  after_hours_voicemail_prob: 0.35   # of calls hitting a closed VQ, share that leave a voicemail
+
+
+# ------------------------------------------------------------------ inbound queue behaviour (global)
+inbound:
+  short_abandon_prob: 0.015   # forced instant hang-ups (< threshold) on top of the natural tail
+                              # per-VQ override: vqs[].short_abandon_prob
+  abandon_while_ringing_prob: 0.006  # customer drops while the agent phone rings
+                              # per-VQ override: vqs[].abandon_while_ringing_prob
+  rona_prob: 0.02             # Redirect On No Answer: agent alerted, no pick-up, call re-queued
+                              # per-VQ override: vqs[].rona_prob
+  rona_ring_s: 25.0           # ring time on a RONA leg
+  overflow_wait_s: 120.0      # after waiting this long a call may overflow to vqs[].overflow_vq ...
+  overflow_prob: 0.6          # ... with this probability
+  callback_offer_wait_s: 240.0  # callback is offered when the VQ's expected wait exceeds this
+  callback_accept_prob: 0.35  # share of offered customers that accept (=> CallbackRequested leg)
+  callback_connect_prob: 0.75 # later outbound callback: Answered
+  callback_no_answer_prob: 0.2  # ... NoAnswer (remainder = Busy)
+  max_transfer_depth: 3       # max chained transfers; deeper legs complete normally
+  after_hours_leak: 0.04      # weight closed VQs keep so a trickle of after-hours calls still arrives
+
+
+# ------------------------------------------------------------------ queue / wait model
+# Expected wait per VQ per minute = f(offered load / staffed capacity).  This is what makes
+# bursts hurt: load > capacity => waits explode => abandons, callbacks, overflow, SL collapse.
+queue_model:
+  occupancy_target: 0.85      # capacity = staffed agents * 60 / AHT * occupancy_target (calls/min)
+  window_min: 12              # trailing minutes of arrivals used as "offered load"
+  load_knee: 0.6              # below this load ratio the wait is just base_asa_s
+  load_k: 4.0                 # exponential growth of the wait above the knee (bigger = harsher)
+  max_wait_s: 1800.0          # cap on the expected wait
+  backlog_decay: 0.88         # per-minute decay of the wait after a burst (1.0 = never recovers)
+  wait_gamma_shape: 1.5       # shape of the per-call wait distribution (1 = exponential, 5 = tight)
+
+
+# ------------------------------------------------------------------ staffing / roster sizing
+staffing:
+  occupancy: 0.78             # planned agent occupancy used to size the roster
+  roster_factor: 1.05         # global staffing multiplier: 0.8 understaffed centre, 1.3 comfortable
+  shift_len_h: 8.5            # shift length in hours
+  secondary_skill_prob: 0.35  # share of agents that also carry a second VQ skill in their LOB
+  min_agents_per_open_hour: 2 # guaranteed eligible agents for every open hour of every VQ
+
+
+# ------------------------------------------------------------------ outbound / internal / DID
+outbound:
+  manual_results:             # result mix of agent-dialled calls
+    Answered: 0.55
+    NoAnswer: 0.3
+    Busy: 0.05
+    AnsweringMachine: 0.1
+  dialer_results:             # result mix of dialer attempts
+    Answered: 0.3
+    NoAnswer: 0.35
+    Busy: 0.07
+    AnsweringMachine: 0.25
+    DialerDrop: 0.03          # customer answered, no agent free => abandoned outbound
+  campaigns:                  # campaign name -> LOB (agents come from that LOB's VQs)
+    CAMP_Collections_PastDue: Collections
+    CAMP_Sales_Winback: Sales
+    CAMP_Retention_RenewalReminder: Retention
+    CAMP_Billing_PaymentReminder: Billing
+  internal_answer_prob: 0.85  # agent-to-agent calls answered
+  did_answer_prob: 0.72       # direct DID calls answered (otherwise voicemail)
+
+
+# ------------------------------------------------------------------ customers
+customers:
+  pool_size: 400000           # distinct customers available
+  skew_power: 2.5             # repeat-caller skew (1 = uniform, 3 = heavy repeaters)
+  segments:                   # relative segment mix; VIP/Enterprise get stronger PBR matching
+    Consumer: 0.72
+    SMB: 0.15
+    Enterprise: 0.05
+    VIP: 0.08
+
+
+# ------------------------------------------------------------------ business outcomes
+# Every handled customer leg (an agent talked to a customer: inbound answered, warm-transfer
+# received, conference initiator, direct DID, outbound / dialer / callback connected) records one
+# primary business outcome, written to interaction_outcome_fact and mirrored in DISPOSITION on the
+# fact row.  The outcome catalogue itself lives per LOB in lobs[].business_outcomes below; this
+# section holds the cross-LOB effects.
+outcomes:
+  enabled: true               # false: no outcome table (DISPOSITION is still drawn from the same model)
+  currency: USD               # CURRENCY on amount-bearing outcomes
+  agent_effect_scale: 1.0     # multiplies every business_outcomes[].agent_lift; 0 = outcomes do not
+                              # depend on the agent, 2 = star agents dominate
+  wait_penalty_per_min: 0.12  # log-odds penalty on Positive outcomes per minute waited beyond the first
+                              # (a customer who waited 10 min is ~e^-1.1 = 0.34x as likely to buy / stay)
+  segment_lift:               # log-odds shift on Positive outcomes by customer segment
+    Consumer: 0.0
+    SMB: 0.1
+    Enterprise: 0.25
+    VIP: 0.35
+  cross_sell_prob: 0.05       # baseline chance of a secondary CrossSell outcome (OUTCOME_SEQ=2) on calls
+                              # whose primary outcome is not Negative; 0 disables
+  cross_sell:                 # definition of that secondary outcome (same fields as business_outcomes)
+    weight: 1.0
+    polarity: Positive
+    category: Sale
+    agent_lift: 0.5
+    offer_prob: 1.0
+    follow_up_prob: 0.0
+    amount_type: Revenue
+    amount_median: 18.0
+    amount_sigma: 0.5
+    subtypes: {DeviceInsurance: 0.3, StreamingAddOn: 0.25, DataBoost: 0.25, Accessory: 0.2}
+  in_call_event_prob: 0.35    # share of non-monetary outcomes whose OUTCOME_TIME falls inside the talk
+                              # (the rest are coded at wrap-up); monetary outcomes are always in-call
+  follow_up_days: [1.0, 5.0]  # FOLLOW_UP_DUE_TIME = recorded + U(min, max) days, at a business hour
+  promise_days: [3.0, 14.0]   # same for Promise (promise-to-pay) amounts
+
+
+# ------------------------------------------------------------------ output
+output:
+  directory: ./out            # root folder (interaction_resource_fact/, interaction_outcome_fact/,
+                              # dim_*.parquet, _manifest.json)
+  compression: zstd           # zstd | snappy | gzip | none
+  partition_by_day: true      # true: call_date=YYYY-MM-DD/part-0.parquet ; false: one file per table
+  write_dimensions: true      # write dim_site / dim_lob / dim_vq / dim_agent / dim_customer
+  validate: true              # run the invariant checks per day on both tables (abort on failure)
+
+
+# ------------------------------------------------------------------ sites
+sites:                        # weight = share of agents; offshore sites take most night shifts
+  - {name: Dallas,  country: US, weight: 0.38, offshore: false, outbound_cli: "18005550100"}
+  - {name: Phoenix, country: US, weight: 0.22, offshore: false, outbound_cli: "18005550200"}
+  - {name: Toronto, country: CA, weight: 0.15, offshore: false, outbound_cli: "18005550300"}
+  - {name: Manila,  country: PH, weight: 0.25, offshore: true,  outbound_cli: "18005550400"}
+
+
+# ------------------------------------------------------------------ lines of business
+# business_outcomes : the outcomes an agent can record on a handled customer call. The key is the
+#                     BUSINESS_RESULT (and the fact row's DISPOSITION); per outcome:
+#                       weight         baseline relative frequency
+#                       polarity       Positive | Neutral | Negative (quick "good / nothing / bad" roll-up)
+#                       category       Sale | Retention | Churn | Service | Escalation | Billing |
+#                                      Collections | FollowUp | NoChange
+#                       agent_lift     log-odds per unit of agent quality (the PBR z-score): 0.6 =>
+#                                      a +1 sigma agent has 1.8x the odds, a -1 sigma agent 0.55x;
+#                                      negative for outcomes good agents avoid (Cancelled, Escalated)
+#                       offer_prob     probability an offer was presented (OFFER_MADE_FLAG)
+#                       follow_up_prob probability a case is opened (CASE_ID, FOLLOW_UP_DUE_TIME)
+#                       amount_type    Revenue | MRR_Retained | MRR_Lost | Payment | Credit | Promise | null
+#                       amount_median  log-normal median of AMOUNT, amount_sigma its spread
+#                       subtypes       OUTCOME_SUBTYPE mix: product sold, save offer, cancel reason,
+#                                      resolution type, payment method ...
+#                     Positive outcomes are additionally shifted by outcomes.segment_lift and
+#                     penalised by outcomes.wait_penalty_per_min; `short` calls (4-30 s) never get a
+#                     Positive or amount-bearing outcome.
+# outcome_weights   : what happens after an agent answers (call handling path; keys are fixed):
+#                     normal | short (<30s talk) | long (~30 min) | multi_hold | system_drop |
+#                     blind_transfer | warm_transfer | consult_only | conference | multi_hop |
+#                     external_transfer
+# transfer_targets  : where transfers / consults from this LOB go (VQ name -> weight)
+lobs:
+  - name: Sales
+    short: SAL
+    business_outcomes:
+      Sale:              {weight: 0.26, polarity: Positive, category: Sale, agent_lift: 0.6, offer_prob: 1.0,
+                          amount_type: Revenue, amount_median: 65.0, amount_sigma: 0.5,
+                          subtypes: {Mobile_Postpaid: 0.32, Broadband_Fibre: 0.25, TV_Bundle: 0.14,
+                                     Mobile_Prepaid: 0.13, Device_Financing: 0.1, Accessory: 0.06}}
+      NoSale:            {weight: 0.3, polarity: Negative, category: NoChange, agent_lift: -0.3, offer_prob: 1.0,
+                          subtypes: {Price: 0.4, StillDeciding: 0.25, Competitor: 0.2, NotEligible: 0.15}}
+      CallbackScheduled: {weight: 0.12, polarity: Neutral, category: FollowUp, offer_prob: 0.7, follow_up_prob: 1.0}
+      Info:              {weight: 0.2, polarity: Neutral, category: NoChange, offer_prob: 0.3}
+      NotInterested:     {weight: 0.12, polarity: Negative, category: NoChange, agent_lift: -0.15, offer_prob: 0.5}
+    outcome_weights: {normal: 0.6, short: 0.1, long: 0.03, multi_hold: 0.08, blind_transfer: 0.06,
+                      warm_transfer: 0.04, consult_only: 0.04, conference: 0.01, multi_hop: 0.01,
+                      external_transfer: 0.01, system_drop: 0.02}
+    transfer_targets: {VQ_Retention_Cancel: 0.2, VQ_CustServ_General: 0.33, VQ_Billing_Payments: 0.25,
+                       VQ_Tech_Tier1: 0.1, VQ_Sales_Upgrade: 0.09, VQ_Sales_Spanish: 0.03}
+  - name: Retention
+    short: RET
+    business_outcomes:      # Saved / Cancelled / Downgraded / OfferDeclined (kept plan) / NoChange / Pending
+      Saved:           {weight: 0.32, polarity: Positive, category: Retention, agent_lift: 0.7, offer_prob: 0.95,
+                        amount_type: MRR_Retained, amount_median: 85.0, amount_sigma: 0.45,
+                        subtypes: {Discount: 0.42, PlanChange: 0.2, FreeMonths: 0.15, DeviceUpgrade: 0.1,
+                                   ServiceFix: 0.08, NoOfferNeeded: 0.05}}
+      Cancelled:       {weight: 0.2, polarity: Negative, category: Churn, agent_lift: -0.5, offer_prob: 0.85,
+                        amount_type: MRR_Lost, amount_median: 85.0, amount_sigma: 0.45,
+                        subtypes: {Price: 0.38, Competitor: 0.3, ServiceIssues: 0.15, Moving: 0.1, Other: 0.07}}
+      Downgraded:      {weight: 0.12, polarity: Neutral, category: Retention, agent_lift: 0.1, offer_prob: 1.0,
+                        amount_type: MRR_Lost, amount_median: 25.0, amount_sigma: 0.5,
+                        subtypes: {PlanDowngrade: 0.6, RemovedAddOn: 0.4}}
+      OfferDeclined:   {weight: 0.12, polarity: Negative, category: NoChange, agent_lift: -0.2, offer_prob: 1.0}
+      NoChange:        {weight: 0.14, polarity: Neutral, category: NoChange, offer_prob: 0.2}
+      PendingDecision: {weight: 0.1, polarity: Neutral, category: FollowUp, offer_prob: 0.9, follow_up_prob: 1.0}
+    outcome_weights: {normal: 0.48, short: 0.04, long: 0.08, multi_hold: 0.14, blind_transfer: 0.05,
+                      warm_transfer: 0.07, consult_only: 0.08, conference: 0.02, multi_hop: 0.01,
+                      external_transfer: 0.01, system_drop: 0.02}
+    transfer_targets: {VQ_Sales_Upgrade: 0.25, VQ_Billing_Disputes: 0.28, VQ_CustServ_Account: 0.28,
+                       VQ_Tech_Tier1: 0.15, VQ_Retention_VIP: 0.04}
+  - name: CustomerService
+    short: CS
+    business_outcomes:
+      Resolved:   {weight: 0.52, polarity: Positive, category: Service, agent_lift: 0.35,
+                   subtypes: {AccountUpdate: 0.3, Explained: 0.3, ServiceChange: 0.15, ComplaintResolved: 0.1, Other: 0.15}}
+      FollowUp:   {weight: 0.14, polarity: Neutral, category: FollowUp, agent_lift: -0.2, follow_up_prob: 1.0}
+      Escalated:  {weight: 0.09, polarity: Negative, category: Escalation, agent_lift: -0.3, follow_up_prob: 1.0,
+                   subtypes: {Supervisor: 0.5, Complaint: 0.3, BackOffice: 0.2}}
+      Info:       {weight: 0.17, polarity: Neutral, category: NoChange}
+      Unresolved: {weight: 0.08, polarity: Negative, category: Service, agent_lift: -0.3}
+    outcome_weights: {normal: 0.55, short: 0.08, long: 0.03, multi_hold: 0.08, blind_transfer: 0.09,
+                      warm_transfer: 0.05, consult_only: 0.05, conference: 0.01, multi_hop: 0.02,
+                      external_transfer: 0.02, system_drop: 0.02}
+    transfer_targets: {VQ_Billing_Payments: 0.3, VQ_Tech_Tier1: 0.25, VQ_Sales_New: 0.15,
+                       VQ_Retention_Cancel: 0.15, VQ_CustServ_Account: 0.15}
+  - name: TechSupport             # L1 = VQ_Tech_Tier1, L2 = VQ_Tech_Tier2 (escalation = transfer share below)
+    short: TEC
+    business_outcomes:
+      Resolved:   {weight: 0.48, polarity: Positive, category: Service, agent_lift: 0.4,
+                   subtypes: {Reset: 0.3, ConfigFix: 0.3, Educated: 0.2, RemoteFix: 0.2}}
+      Escalated:  {weight: 0.14, polarity: Negative, category: Escalation, agent_lift: -0.3, follow_up_prob: 1.0,
+                   subtypes: {Tier2Ticket: 0.6, Engineering: 0.2, NetworkOps: 0.2}}   # ticket escalation (L1->L2 live transfer is in transfer_targets)
+      Dispatch:   {weight: 0.12, polarity: Neutral, category: Service, follow_up_prob: 1.0,
+                   subtypes: {Technician: 0.8, Replacement: 0.2}}
+      FollowUp:   {weight: 0.14, polarity: Neutral, category: FollowUp, follow_up_prob: 1.0}
+      Info:       {weight: 0.07, polarity: Neutral, category: NoChange}
+      Unresolved: {weight: 0.05, polarity: Negative, category: Service, agent_lift: -0.3}
+    outcome_weights: {normal: 0.5, short: 0.05, long: 0.09, multi_hold: 0.12, blind_transfer: 0.06,
+                      warm_transfer: 0.06, consult_only: 0.05, conference: 0.02, multi_hop: 0.02,
+                      external_transfer: 0.01, system_drop: 0.02}
+    transfer_targets: {VQ_Tech_Tier2: 0.5, VQ_CustServ_General: 0.2, VQ_Billing_Payments: 0.15,
+                       VQ_Sales_Upgrade: 0.1, VQ_Tech_Enterprise: 0.05}   # L1 -> L2 escalations = 50 % of transfers
+  - name: Billing
+    short: BIL
+    business_outcomes:
+      PaymentTaken: {weight: 0.33, polarity: Positive, category: Billing, agent_lift: 0.2,
+                     amount_type: Payment, amount_median: 120.0, amount_sigma: 0.6,
+                     subtypes: {Card: 0.65, BankTransfer: 0.25, PaymentPlan: 0.1}}
+      Adjusted:     {weight: 0.18, polarity: Positive, category: Billing, agent_lift: 0.1,
+                     amount_type: Credit, amount_median: 30.0, amount_sigma: 0.7,
+                     subtypes: {Goodwill: 0.4, BillingError: 0.4, ProRata: 0.2}}
+      Disputed:     {weight: 0.12, polarity: Negative, category: Billing, agent_lift: -0.2, follow_up_prob: 1.0,
+                     subtypes: {Charge: 0.5, Usage: 0.3, Fee: 0.2}}
+      Info:         {weight: 0.27, polarity: Neutral, category: NoChange}
+      Escalated:    {weight: 0.1, polarity: Negative, category: Escalation, agent_lift: -0.3, follow_up_prob: 1.0}
+    outcome_weights: {normal: 0.58, short: 0.07, long: 0.03, multi_hold: 0.09, blind_transfer: 0.07,
+                      warm_transfer: 0.04, consult_only: 0.05, conference: 0.01, multi_hop: 0.02,
+                      external_transfer: 0.02, system_drop: 0.02}
+    transfer_targets: {VQ_Billing_Disputes: 0.35, VQ_CustServ_General: 0.25, VQ_Retention_Cancel: 0.2,
+                       VQ_Collections_Inbound: 0.2}
+  - name: Collections
+    short: COL
+    business_outcomes:
+      PromiseToPay: {weight: 0.33, polarity: Positive, category: Collections, agent_lift: 0.45, follow_up_prob: 1.0,
+                     amount_type: Promise, amount_median: 180.0, amount_sigma: 0.6}   # FOLLOW_UP_DUE_TIME = promise date
+      Paid:         {weight: 0.24, polarity: Positive, category: Collections, agent_lift: 0.3,
+                     amount_type: Payment, amount_median: 160.0, amount_sigma: 0.6,
+                     subtypes: {Card: 0.7, BankTransfer: 0.3}}
+      Refused:      {weight: 0.15, polarity: Negative, category: NoChange, agent_lift: -0.3}
+      Dispute:      {weight: 0.13, polarity: Negative, category: Collections, follow_up_prob: 1.0}
+      Hardship:     {weight: 0.08, polarity: Neutral, category: Collections, follow_up_prob: 1.0}
+      NoChange:     {weight: 0.07, polarity: Neutral, category: NoChange}
+    outcome_weights: {normal: 0.6, short: 0.1, long: 0.02, multi_hold: 0.06, blind_transfer: 0.05,
+                      warm_transfer: 0.04, consult_only: 0.05, conference: 0.01, multi_hop: 0.01,
+                      external_transfer: 0.04, system_drop: 0.02}
+    transfer_targets: {VQ_Billing_Payments: 0.5, VQ_Billing_Disputes: 0.3, VQ_CustServ_General: 0.2}
+
+
+# ------------------------------------------------------------------ virtual queues
+# One entry per VQ.  Field legend (all per queue):
+#   weight               relative share of inbound arrivals (deliberately unbalanced)
+#   open_hour/close_hour local opening window, close 24 = midnight; 0/24 = 24x7
+#   days                 Mon-Sun | Mon-Sat | Mon-Fri
+#   talk_median_s        median talk time (log-normal), talk_sigma its spread (0.4 tight, 0.8 wide)
+#   hold_prob            probability of a hold on a normal call, hold_mean_s its mean length
+#   acw_mean_s           mean after-call work
+#   base_asa_s           average speed of answer when lightly loaded (drives service level)
+#   patience_median_s    customer patience (log-normal median); lower => more abandons
+#   patience_sigma       spread of patience
+#   service_level_s      SL threshold for SERVICE_LEVEL_FLAG (answer within N seconds)
+#   overflow_vq          backup queue after inbound.overflow_wait_s (null = none)
+#   home_site            site reported on queue legs that never reached an agent
+#   pbr_enabled          Predictive Behavioural Routing (skewed agent selection) vs plain ACD
+#   pbr_skew             strength of the skew: 0 uniform, 0.5 mild, 1.0 strong, 1.2 extreme
+#   pbr_premium_boost    extra concentration on top agents for VIP/Enterprise customers (1 = none)
+#   short_abandon_prob, abandon_while_ringing_prob, rona_prob, ivr_contained_prob
+#                        per-queue overrides of the global inbound/ivr values (null = use global)
+#   wait_scale           multiplier on every drawn queue wait (1.5 = 50 % slower => more abandons)
+vqs:
+  # ---- monster queues (~60 % of inbound) ----
+  - {name: VQ_CustServ_General, lob: CustomerService, skill: SK_CS_General, weight: 0.27,
+     open_hour: 0, close_hour: 24, days: Mon-Sun,
+     talk_median_s: 270, talk_sigma: 0.6, hold_prob: 0.3, hold_mean_s: 55, acw_mean_s: 35,
+     base_asa_s: 7, patience_median_s: 120, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_Overflow_Service, home_site: Manila,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Sales_New, lob: Sales, skill: SK_Sales_New, weight: 0.19,
+     open_hour: 8, close_hour: 21, days: Mon-Sun,
+     talk_median_s: 330, talk_sigma: 0.55, hold_prob: 0.25, hold_mean_s: 45, acw_mean_s: 40,
+     base_asa_s: 6, patience_median_s: 110, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_Overflow_Sales, home_site: Dallas,
+     pbr_enabled: true, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Tech_Tier1, lob: TechSupport, skill: SK_Tech_T1, weight: 0.15,          # L1 support, 24x7
+     open_hour: 0, close_hour: 24, days: Mon-Sun,
+     talk_median_s: 420, talk_sigma: 0.65, hold_prob: 0.45, hold_mean_s: 95, acw_mean_s: 50,
+     base_asa_s: 10, patience_median_s: 150, patience_sigma: 1.0, service_level_s: 30,
+     overflow_vq: VQ_Overflow_Service, home_site: Manila,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  # ---- mid-size queues ----
+  - {name: VQ_Billing_Payments, lob: Billing, skill: SK_Billing, weight: 0.1,
+     open_hour: 7, close_hour: 22, days: Mon-Sun,
+     talk_median_s: 240, talk_sigma: 0.55, hold_prob: 0.25, hold_mean_s: 45, acw_mean_s: 30,
+     base_asa_s: 6, patience_median_s: 120, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_CustServ_General, home_site: Phoenix,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Retention_Cancel, lob: Retention, skill: SK_Retention, weight: 0.09,
+     open_hour: 8, close_hour: 22, days: Mon-Sun,
+     talk_median_s: 520, talk_sigma: 0.55, hold_prob: 0.45, hold_mean_s: 90, acw_mean_s: 70,
+     base_asa_s: 12, patience_median_s: 180, patience_sigma: 0.9, service_level_s: 30,
+     overflow_vq: VQ_Retention_Save_Offers, home_site: Dallas,
+     pbr_enabled: true, pbr_skew: 1.0, pbr_premium_boost: 1.8,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Sales_Upgrade, lob: Sales, skill: SK_Sales_Upgrade, weight: 0.05,
+     open_hour: 8, close_hour: 21, days: Mon-Sun,
+     talk_median_s: 280, talk_sigma: 0.55, hold_prob: 0.3, hold_mean_s: 50, acw_mean_s: 40,
+     base_asa_s: 7, patience_median_s: 120, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_Overflow_Sales, home_site: Phoenix,
+     pbr_enabled: true, pbr_skew: 0.7, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_CustServ_Account, lob: CustomerService, skill: SK_CS_Account, weight: 0.045,
+     open_hour: 7, close_hour: 23, days: Mon-Sun,
+     talk_median_s: 310, talk_sigma: 0.6, hold_prob: 0.35, hold_mean_s: 60, acw_mean_s: 40,
+     base_asa_s: 7, patience_median_s: 130, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_CustServ_General, home_site: Phoenix,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Retention_Save_Offers, lob: Retention, skill: SK_Retention_Offers, weight: 0.03,
+     open_hour: 8, close_hour: 22, days: Mon-Sun,
+     talk_median_s: 460, talk_sigma: 0.5, hold_prob: 0.4, hold_mean_s: 80, acw_mean_s: 60,
+     base_asa_s: 10, patience_median_s: 160, patience_sigma: 0.9, service_level_s: 30,
+     overflow_vq: null, home_site: Toronto,
+     pbr_enabled: true, pbr_skew: 0.9, pbr_premium_boost: 1.8,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  # ---- small queues ----
+  - {name: VQ_Tech_Tier2, lob: TechSupport, skill: SK_Tech_T2, weight: 0.02,               # L2 support (escalations)
+     open_hour: 7, close_hour: 23, days: Mon-Sun,
+     talk_median_s: 780, talk_sigma: 0.6, hold_prob: 0.55, hold_mean_s: 140, acw_mean_s: 90,
+     base_asa_s: 22, patience_median_s: 240, patience_sigma: 0.8, service_level_s: 60,
+     overflow_vq: null, home_site: Dallas,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Collections_Inbound, lob: Collections, skill: SK_Collections, weight: 0.015,
+     open_hour: 8, close_hour: 21, days: Mon-Sat,
+     talk_median_s: 300, talk_sigma: 0.6, hold_prob: 0.3, hold_mean_s: 60, acw_mean_s: 45,
+     base_asa_s: 10, patience_median_s: 140, patience_sigma: 1.0, service_level_s: 30,
+     overflow_vq: VQ_Billing_Payments, home_site: Dallas,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Billing_Disputes, lob: Billing, skill: SK_Billing_Disputes, weight: 0.012,
+     open_hour: 8, close_hour: 20, days: Mon-Fri,
+     talk_median_s: 480, talk_sigma: 0.55, hold_prob: 0.45, hold_mean_s: 100, acw_mean_s: 75,
+     base_asa_s: 14, patience_median_s: 200, patience_sigma: 0.9, service_level_s: 30,
+     overflow_vq: null, home_site: Dallas,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Retention_Loyalty, lob: Retention, skill: SK_Loyalty, weight: 0.008,
+     open_hour: 9, close_hour: 20, days: Mon-Sat,
+     talk_median_s: 400, talk_sigma: 0.5, hold_prob: 0.35, hold_mean_s: 70, acw_mean_s: 55,
+     base_asa_s: 9, patience_median_s: 150, patience_sigma: 0.9, service_level_s: 30,
+     overflow_vq: VQ_Retention_Save_Offers, home_site: Toronto,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  # ---- long tail: niche queues, a few dozen calls a day ----
+  - {name: VQ_Sales_Spanish, lob: Sales, skill: SK_Sales_Spanish, weight: 0.006,
+     open_hour: 9, close_hour: 20, days: Mon-Sat,
+     talk_median_s: 360, talk_sigma: 0.55, hold_prob: 0.25, hold_mean_s: 45, acw_mean_s: 40,
+     base_asa_s: 12, patience_median_s: 110, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: VQ_Sales_New, home_site: Phoenix,
+     pbr_enabled: true, pbr_skew: 0.5, pbr_premium_boost: 1.5,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Tech_Enterprise, lob: TechSupport, skill: SK_Tech_Enterprise, weight: 0.004,
+     open_hour: 7, close_hour: 22, days: Mon-Fri,
+     talk_median_s: 900, talk_sigma: 0.6, hold_prob: 0.55, hold_mean_s: 150, acw_mean_s: 120,
+     base_asa_s: 20, patience_median_s: 300, patience_sigma: 0.8, service_level_s: 60,
+     overflow_vq: null, home_site: Dallas,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Retention_VIP, lob: Retention, skill: SK_VIP, weight: 0.003,
+     open_hour: 8, close_hour: 22, days: Mon-Sun,
+     talk_median_s: 600, talk_sigma: 0.5, hold_prob: 0.4, hold_mean_s: 80, acw_mean_s: 90,
+     base_asa_s: 5, patience_median_s: 240, patience_sigma: 0.9, service_level_s: 15,
+     overflow_vq: VQ_Retention_Cancel, home_site: Toronto,
+     pbr_enabled: true, pbr_skew: 0.6, pbr_premium_boost: 2.0,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Overflow_Sales, lob: Sales, skill: SK_Sales_New, weight: 0.003,
+     open_hour: 8, close_hour: 21, days: Mon-Sun,
+     talk_median_s: 330, talk_sigma: 0.55, hold_prob: 0.25, hold_mean_s: 45, acw_mean_s: 40,
+     base_asa_s: 15, patience_median_s: 110, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: null, home_site: Manila,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_CustServ_Accessibility, lob: CustomerService, skill: SK_CS_Accessibility, weight: 0.002,
+     open_hour: 8, close_hour: 20, days: Mon-Fri,
+     talk_median_s: 520, talk_sigma: 0.5, hold_prob: 0.3, hold_mean_s: 60, acw_mean_s: 60,
+     base_asa_s: 8, patience_median_s: 200, patience_sigma: 0.9, service_level_s: 30,
+     overflow_vq: VQ_CustServ_General, home_site: Toronto,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+  - {name: VQ_Overflow_Service, lob: CustomerService, skill: SK_CS_General, weight: 0.002,
+     open_hour: 0, close_hour: 24, days: Mon-Sun,
+     talk_median_s: 290, talk_sigma: 0.6, hold_prob: 0.3, hold_mean_s: 55, acw_mean_s: 35,
+     base_asa_s: 15, patience_median_s: 120, patience_sigma: 1.0, service_level_s: 20,
+     overflow_vq: null, home_site: Manila,
+     pbr_enabled: false, pbr_skew: 0.8, pbr_premium_boost: 1.6,
+     short_abandon_prob: null, abandon_while_ringing_prob: null, rona_prob: null, ivr_contained_prob: null,
+     wait_scale: 1.0}
+
+
+# ------------------------------------------------------------------ shortcuts (applied after `vqs`)
+# Use these instead of copying the whole `vqs` list when you only want to nudge a few queues.
+vq_weights: {}                # e.g. {VQ_CustServ_General: 0.35, VQ_Retention_VIP: 0.001}
+vq_overrides: {}              # e.g. {VQ_Tech_Tier1: {pbr_enabled: true, pbr_skew: 1.0, rona_prob: 0.05},
+                              #       VQ_Tech_Tier2: {patience_median_s: 400, wait_scale: 1.4,
+                              #                       short_abandon_prob: 0.03}}

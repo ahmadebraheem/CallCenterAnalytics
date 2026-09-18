@@ -27,11 +27,35 @@ class SiteConfig:
 
 
 @dataclass
+class OutcomeDef:
+    """One business outcome an agent can record on a handled customer call.
+
+    The name of the outcome (the dict key in `business_outcomes`) becomes BUSINESS_RESULT in the
+    outcome fact and DISPOSITION on the agent's fact row.
+    """
+    weight: float                       # baseline relative frequency
+    polarity: str = "Neutral"           # Positive | Neutral | Negative
+    category: str = "NoChange"          # Sale | Retention | Churn | Service | Escalation | Billing | Collections | FollowUp | NoChange
+    # log-odds shift per unit of agent quality (the PBR z-score): 0.6 => a +1 sigma agent gets
+    # e^0.6 = 1.8x the odds of this outcome, a -1 sigma agent 0.55x. Negative values for outcomes
+    # that good agents avoid (Cancelled, Escalated ...).
+    agent_lift: float = 0.0
+    offer_prob: float = 0.0             # probability an offer was presented (OFFER_MADE_FLAG)
+    follow_up_prob: float = 0.0         # probability a case / follow-up is created (CASE_ID, FOLLOW_UP_DUE_TIME)
+    amount_type: Optional[str] = None   # Revenue | MRR_Retained | MRR_Lost | Payment | Credit | Promise (None = no amount)
+    amount_median: float = 0.0          # log-normal median of AMOUNT
+    amount_sigma: float = 0.5
+    subtypes: Dict[str, float] = field(default_factory=dict)  # OUTCOME_SUBTYPE mix (product, save offer, reason ...)
+
+
+@dataclass
 class LOBConfig:
     name: str
     short: str
-    dispositions: Dict[str, float]
-    # Weights of what happens once an agent answers an inbound call.
+    # Business outcomes an agent can record after handling a customer call (BUSINESS_RESULT ->
+    # definition). The primary outcome also becomes DISPOSITION on the fact row.
+    business_outcomes: Dict[str, OutcomeDef]
+    # Weights of what happens once an agent answers an inbound call (call handling path).
     outcome_weights: Dict[str, float]
     # Where blind / warm transfers from this LOB go (VQ name -> weight).
     transfer_targets: Dict[str, float]
@@ -62,6 +86,13 @@ class VQConfig:
     pbr_enabled: bool = False
     pbr_skew: float = 0.8             # log-normal sigma of agent weights; 0 = uniform, 1.2 = extreme
     pbr_premium_boost: float = 1.6    # exponent applied to weights for VIP / Enterprise customers
+    # Per-queue overrides of the global `inbound` behaviour (None = use the global value).
+    short_abandon_prob: Optional[float] = None
+    abandon_while_ringing_prob: Optional[float] = None
+    rona_prob: Optional[float] = None
+    ivr_contained_prob: Optional[float] = None
+    # Multiplier on the drawn queue wait (1.0 = as modelled); >1 makes the queue slower => more abandons.
+    wait_scale: float = 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -188,6 +219,43 @@ class CustomerConfig:
         "Consumer": 0.72, "SMB": 0.15, "Enterprise": 0.05, "VIP": 0.08})
 
 
+OUTCOME_POLARITIES = ("Positive", "Neutral", "Negative")
+OUTCOME_CATEGORIES = ("Sale", "Retention", "Churn", "Service", "Escalation", "Billing", "Collections", "FollowUp", "NoChange")
+AMOUNT_TYPES = ("Revenue", "MRR_Retained", "MRR_Lost", "Payment", "Credit", "Promise")
+
+
+def _default_cross_sell() -> OutcomeDef:
+    return OutcomeDef(weight=1.0, polarity="Positive", category="Sale", agent_lift=0.5, offer_prob=1.0,
+                      amount_type="Revenue", amount_median=18.0, amount_sigma=0.5,
+                      subtypes={"DeviceInsurance": 0.30, "StreamingAddOn": 0.25, "DataBoost": 0.25, "Accessory": 0.20})
+
+
+@dataclass
+class OutcomesConfig:
+    """Business outcomes recorded on handled customer calls (interaction_outcome_fact)."""
+    enabled: bool = True
+    currency: str = "USD"
+    # Global multiplier on every OutcomeDef.agent_lift (0 = outcomes independent of the agent).
+    agent_effect_scale: float = 1.0
+    # Log-odds penalty on Positive outcomes per minute the customer waited beyond the first minute
+    # (an angry customer after a 10-minute wait is harder to sell to / save).
+    wait_penalty_per_min: float = 0.12
+    # Log-odds shift on Positive outcomes by customer segment.
+    segment_lift: Dict[str, float] = field(default_factory=lambda: {
+        "Consumer": 0.0, "SMB": 0.10, "Enterprise": 0.25, "VIP": 0.35})
+    # Calls with the `short` handling outcome (4-30 s talk) never produce Positive / amount-bearing
+    # outcomes; they fall back to the remaining (Neutral / Negative) outcomes of the LOB.
+    # Probability of a secondary cross-sell outcome (OUTCOME_SEQ = 2) on calls whose primary
+    # outcome is not Negative; scaled by the cross_sell agent_lift like any other outcome.
+    cross_sell_prob: float = 0.05
+    cross_sell: OutcomeDef = field(default_factory=_default_cross_sell)
+    # Share of outcomes whose OUTCOME_TIME falls inside the conversation (order submitted, payment
+    # taken ...) rather than at wrap-up; always applies to amount-bearing outcomes.
+    in_call_event_prob: float = 0.35
+    follow_up_days: List[float] = field(default_factory=lambda: [1.0, 5.0])    # FOLLOW_UP_DUE_TIME window
+    promise_days: List[float] = field(default_factory=lambda: [3.0, 14.0])    # for Promise amounts
+
+
 @dataclass
 class OutputConfig:
     directory: str = "./out"
@@ -209,11 +277,91 @@ def _default_sites() -> List[SiteConfig]:
     ]
 
 
+def _o(weight: float, polarity: str = "Neutral", category: str = "NoChange", **kw) -> OutcomeDef:
+    return OutcomeDef(weight=weight, polarity=polarity, category=category, **kw)
+
+
+def _default_business_outcomes() -> Dict[str, Dict[str, OutcomeDef]]:
+    return {
+        "Sales": {
+            "Sale": _o(0.26, "Positive", "Sale", agent_lift=0.6, offer_prob=1.0,
+                       amount_type="Revenue", amount_median=65.0, amount_sigma=0.5,
+                       subtypes={"Mobile_Postpaid": 0.32, "Broadband_Fibre": 0.25, "TV_Bundle": 0.14,
+                                 "Mobile_Prepaid": 0.13, "Device_Financing": 0.10, "Accessory": 0.06}),
+            "NoSale": _o(0.30, "Negative", "NoChange", agent_lift=-0.3, offer_prob=1.0,
+                         subtypes={"Price": 0.40, "StillDeciding": 0.25, "Competitor": 0.20, "NotEligible": 0.15}),
+            "CallbackScheduled": _o(0.12, "Neutral", "FollowUp", offer_prob=0.7, follow_up_prob=1.0),
+            "Info": _o(0.20, "Neutral", "NoChange", offer_prob=0.3),
+            "NotInterested": _o(0.12, "Negative", "NoChange", agent_lift=-0.15, offer_prob=0.5),
+        },
+        "Retention": {
+            "Saved": _o(0.32, "Positive", "Retention", agent_lift=0.7, offer_prob=0.95,
+                        amount_type="MRR_Retained", amount_median=85.0, amount_sigma=0.45,
+                        subtypes={"Discount": 0.42, "PlanChange": 0.20, "FreeMonths": 0.15,
+                                  "DeviceUpgrade": 0.10, "ServiceFix": 0.08, "NoOfferNeeded": 0.05}),
+            "Cancelled": _o(0.20, "Negative", "Churn", agent_lift=-0.5, offer_prob=0.85,
+                            amount_type="MRR_Lost", amount_median=85.0, amount_sigma=0.45,
+                            subtypes={"Price": 0.38, "Competitor": 0.30, "ServiceIssues": 0.15, "Moving": 0.10, "Other": 0.07}),
+            "Downgraded": _o(0.12, "Neutral", "Retention", agent_lift=0.1, offer_prob=1.0,
+                             amount_type="MRR_Lost", amount_median=25.0, amount_sigma=0.5,
+                             subtypes={"PlanDowngrade": 0.6, "RemovedAddOn": 0.4}),
+            "OfferDeclined": _o(0.12, "Negative", "NoChange", agent_lift=-0.2, offer_prob=1.0),
+            "NoChange": _o(0.14, "Neutral", "NoChange", offer_prob=0.2),
+            "PendingDecision": _o(0.10, "Neutral", "FollowUp", offer_prob=0.9, follow_up_prob=1.0),
+        },
+        "CustomerService": {
+            "Resolved": _o(0.52, "Positive", "Service", agent_lift=0.35,
+                           subtypes={"AccountUpdate": 0.30, "Explained": 0.30, "ServiceChange": 0.15,
+                                     "ComplaintResolved": 0.10, "Other": 0.15}),
+            "FollowUp": _o(0.14, "Neutral", "FollowUp", agent_lift=-0.2, follow_up_prob=1.0),
+            "Escalated": _o(0.09, "Negative", "Escalation", agent_lift=-0.3, follow_up_prob=1.0,
+                            subtypes={"Supervisor": 0.5, "Complaint": 0.3, "BackOffice": 0.2}),
+            "Info": _o(0.17, "Neutral", "NoChange"),
+            "Unresolved": _o(0.08, "Negative", "Service", agent_lift=-0.3),
+        },
+        "TechSupport": {
+            "Resolved": _o(0.48, "Positive", "Service", agent_lift=0.4,
+                           subtypes={"Reset": 0.30, "ConfigFix": 0.30, "Educated": 0.20, "RemoteFix": 0.20}),
+            "Escalated": _o(0.14, "Negative", "Escalation", agent_lift=-0.3, follow_up_prob=1.0,
+                            subtypes={"Tier2Ticket": 0.6, "Engineering": 0.2, "NetworkOps": 0.2}),
+            "Dispatch": _o(0.12, "Neutral", "Service", follow_up_prob=1.0,
+                           subtypes={"Technician": 0.8, "Replacement": 0.2}),
+            "FollowUp": _o(0.14, "Neutral", "FollowUp", follow_up_prob=1.0),
+            "Info": _o(0.07, "Neutral", "NoChange"),
+            "Unresolved": _o(0.05, "Negative", "Service", agent_lift=-0.3),
+        },
+        "Billing": {
+            "PaymentTaken": _o(0.33, "Positive", "Billing", agent_lift=0.2,
+                               amount_type="Payment", amount_median=120.0, amount_sigma=0.6,
+                               subtypes={"Card": 0.65, "BankTransfer": 0.25, "PaymentPlan": 0.10}),
+            "Adjusted": _o(0.18, "Positive", "Billing", agent_lift=0.1,
+                           amount_type="Credit", amount_median=30.0, amount_sigma=0.7,
+                           subtypes={"Goodwill": 0.4, "BillingError": 0.4, "ProRata": 0.2}),
+            "Disputed": _o(0.12, "Negative", "Billing", agent_lift=-0.2, follow_up_prob=1.0,
+                           subtypes={"Charge": 0.5, "Usage": 0.3, "Fee": 0.2}),
+            "Info": _o(0.27, "Neutral", "NoChange"),
+            "Escalated": _o(0.10, "Negative", "Escalation", agent_lift=-0.3, follow_up_prob=1.0),
+        },
+        "Collections": {
+            "PromiseToPay": _o(0.33, "Positive", "Collections", agent_lift=0.45, follow_up_prob=1.0,
+                               amount_type="Promise", amount_median=180.0, amount_sigma=0.6),
+            "Paid": _o(0.24, "Positive", "Collections", agent_lift=0.3,
+                       amount_type="Payment", amount_median=160.0, amount_sigma=0.6,
+                       subtypes={"Card": 0.7, "BankTransfer": 0.3}),
+            "Refused": _o(0.15, "Negative", "NoChange", agent_lift=-0.3),
+            "Dispute": _o(0.13, "Negative", "Collections", follow_up_prob=1.0),
+            "Hardship": _o(0.08, "Neutral", "Collections", follow_up_prob=1.0),
+            "NoChange": _o(0.07, "Neutral", "NoChange"),
+        },
+    }
+
+
 def _default_lobs() -> List[LOBConfig]:
+    bo = _default_business_outcomes()
     return [
         LOBConfig(
             "Sales", "SAL",
-            dispositions={"Sale": 0.28, "NoSale": 0.30, "CallbackScheduled": 0.12, "Info": 0.20, "NotInterested": 0.10},
+            business_outcomes=bo["Sales"],
             outcome_weights={"normal": 0.60, "short": 0.10, "long": 0.03, "multi_hold": 0.08, "blind_transfer": 0.06,
                              "warm_transfer": 0.04, "consult_only": 0.04, "conference": 0.01, "multi_hop": 0.01,
                              "external_transfer": 0.01, "system_drop": 0.02},
@@ -222,7 +370,7 @@ def _default_lobs() -> List[LOBConfig]:
         ),
         LOBConfig(
             "Retention", "RET",
-            dispositions={"Saved": 0.42, "Cancelled": 0.23, "Downgraded": 0.12, "OfferDeclined": 0.13, "Info": 0.10},
+            business_outcomes=bo["Retention"],
             outcome_weights={"normal": 0.48, "short": 0.04, "long": 0.08, "multi_hold": 0.14, "blind_transfer": 0.05,
                              "warm_transfer": 0.07, "consult_only": 0.08, "conference": 0.02, "multi_hop": 0.01,
                              "external_transfer": 0.01, "system_drop": 0.02},
@@ -231,7 +379,7 @@ def _default_lobs() -> List[LOBConfig]:
         ),
         LOBConfig(
             "CustomerService", "CS",
-            dispositions={"Resolved": 0.55, "Escalated": 0.10, "FollowUp": 0.15, "Info": 0.20},
+            business_outcomes=bo["CustomerService"],
             outcome_weights={"normal": 0.55, "short": 0.08, "long": 0.03, "multi_hold": 0.08, "blind_transfer": 0.09,
                              "warm_transfer": 0.05, "consult_only": 0.05, "conference": 0.01, "multi_hop": 0.02,
                              "external_transfer": 0.02, "system_drop": 0.02},
@@ -240,7 +388,7 @@ def _default_lobs() -> List[LOBConfig]:
         ),
         LOBConfig(
             "TechSupport", "TEC",
-            dispositions={"Resolved": 0.50, "Escalated": 0.15, "Dispatch": 0.12, "FollowUp": 0.15, "Info": 0.08},
+            business_outcomes=bo["TechSupport"],
             outcome_weights={"normal": 0.50, "short": 0.05, "long": 0.09, "multi_hold": 0.12, "blind_transfer": 0.06,
                              "warm_transfer": 0.06, "consult_only": 0.05, "conference": 0.02, "multi_hop": 0.02,
                              "external_transfer": 0.01, "system_drop": 0.02},
@@ -249,7 +397,7 @@ def _default_lobs() -> List[LOBConfig]:
         ),
         LOBConfig(
             "Billing", "BIL",
-            dispositions={"PaymentTaken": 0.35, "Adjusted": 0.20, "Disputed": 0.12, "Info": 0.25, "Escalated": 0.08},
+            business_outcomes=bo["Billing"],
             outcome_weights={"normal": 0.58, "short": 0.07, "long": 0.03, "multi_hold": 0.09, "blind_transfer": 0.07,
                              "warm_transfer": 0.04, "consult_only": 0.05, "conference": 0.01, "multi_hop": 0.02,
                              "external_transfer": 0.02, "system_drop": 0.02},
@@ -258,7 +406,7 @@ def _default_lobs() -> List[LOBConfig]:
         ),
         LOBConfig(
             "Collections", "COL",
-            dispositions={"PromiseToPay": 0.35, "Paid": 0.25, "Refused": 0.15, "NoContact": 0.10, "Dispute": 0.15},
+            business_outcomes=bo["Collections"],
             outcome_weights={"normal": 0.60, "short": 0.10, "long": 0.02, "multi_hold": 0.06, "blind_transfer": 0.05,
                              "warm_transfer": 0.04, "consult_only": 0.05, "conference": 0.01, "multi_hop": 0.01,
                              "external_transfer": 0.04, "system_drop": 0.02},
@@ -319,6 +467,7 @@ class GeneratorConfig:
     staffing: StaffingConfig = field(default_factory=StaffingConfig)
     outbound: OutboundConfig = field(default_factory=OutboundConfig)
     customers: CustomerConfig = field(default_factory=CustomerConfig)
+    outcomes: OutcomesConfig = field(default_factory=OutcomesConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     sites: List[SiteConfig] = field(default_factory=_default_sites)
@@ -369,6 +518,19 @@ class GeneratorConfig:
             for t in l.transfer_targets:
                 if t not in vq_names:
                     raise ValueError(f"LOB {l.name} transfer target {t} does not exist")
+            if not l.business_outcomes:
+                raise ValueError(f"LOB {l.name} has no business_outcomes")
+            if sum(o.weight for o in l.business_outcomes.values()) <= 0:
+                raise ValueError(f"LOB {l.name} business_outcomes weights must sum to a positive number")
+            for name, o in l.business_outcomes.items():
+                _validate_outcome_def(f"LOB {l.name} outcome {name}", o)
+        _validate_outcome_def("outcomes.cross_sell", self.outcomes.cross_sell)
+        if not (0 <= self.outcomes.cross_sell_prob <= 1):
+            raise ValueError("outcomes.cross_sell_prob must be within [0, 1]")
+        for key in ("follow_up_days", "promise_days"):
+            win = getattr(self.outcomes, key)
+            if len(win) != 2 or win[0] < 0 or win[1] < win[0]:
+                raise ValueError(f"outcomes.{key} must be [min_days, max_days] with 0 <= min <= max")
         for camp, lob in self.outbound.campaigns.items():
             if lob not in lob_names:
                 raise ValueError(f"Campaign {camp} references unknown LOB {lob}")
@@ -376,6 +538,24 @@ class GeneratorConfig:
             raise ValueError("days must be >= 1")
         if self.calls_per_day < 1:
             raise ValueError("calls_per_day must be >= 1")
+
+
+def _validate_outcome_def(label: str, o: OutcomeDef) -> None:
+    if o.weight < 0:
+        raise ValueError(f"{label}: weight must be >= 0")
+    if o.polarity not in OUTCOME_POLARITIES:
+        raise ValueError(f"{label}: polarity must be one of {OUTCOME_POLARITIES}")
+    if o.category not in OUTCOME_CATEGORIES:
+        raise ValueError(f"{label}: category must be one of {OUTCOME_CATEGORIES}")
+    if o.amount_type is not None and o.amount_type not in AMOUNT_TYPES:
+        raise ValueError(f"{label}: amount_type must be one of {AMOUNT_TYPES} or null")
+    if o.amount_type is not None and o.amount_median <= 0:
+        raise ValueError(f"{label}: amount_median must be > 0 when amount_type is set")
+    for p in ("offer_prob", "follow_up_prob"):
+        if not (0 <= getattr(o, p) <= 1):
+            raise ValueError(f"{label}: {p} must be within [0, 1]")
+    if o.subtypes and sum(o.subtypes.values()) <= 0:
+        raise ValueError(f"{label}: subtypes weights must sum to a positive number")
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +578,9 @@ def _build(cls, data):
         if origin is list and val is not None:
             (inner,) = get_args(t)
             kwargs[f.name] = [_build(inner, x) if is_dataclass(inner) else x for x in val]
+        elif origin is dict and val is not None and is_dataclass(get_args(t)[1]):
+            inner = get_args(t)[1]
+            kwargs[f.name] = {k: _build(inner, x) for k, x in val.items()}
         elif origin is not None and type(None) in get_args(t):
             inner = [a for a in get_args(t) if a is not type(None)][0]
             kwargs[f.name] = _build(inner, val)

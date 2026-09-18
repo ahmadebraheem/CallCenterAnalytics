@@ -113,3 +113,60 @@ def validate_table(t: pa.Table, cfg: GeneratorConfig, service_levels: dict) -> L
         check("SERVICE_LEVEL_FLAG=0 answered legs are outside threshold",
               pc.and_(pc.and_(pc.equal(c["SERVICE_LEVEL_FLAG"], 0), answered), pc.less_equal(speed, thresholds)))
     return failures
+
+
+def validate_outcomes(o: pa.Table, fact: pa.Table) -> List[str]:
+    """Invariants of the outcome fact and of its relationship with the resource fact of the same day."""
+    failures: List[str] = []
+
+    def check(name: str, bad_mask) -> None:
+        bad = _count_true(bad_mask)
+        if bad:
+            failures.append(f"outcomes: {name}: {bad} rows")
+
+    if o.num_rows == 0:
+        return failures
+    if len(pc.unique(o["OUTCOME_ID"])) != o.num_rows:
+        failures.append("outcomes: OUTCOME_ID not unique")
+
+    # ---- join back to the legs (every outcome hangs off exactly one answered agent leg) ---- #
+    keep = ["IRF_ID", "ANSWER_TIME", "END_TIME", "ACW_END_TIME", "DISPOSITION", "AGENT_ID", "ANSWERED_FLAG",
+            "N_CUSTOMER", "CALL_TYPE"]
+    legs = fact.select(keep).rename_columns([k if k == "IRF_ID" else "F_" + k for k in keep])
+    j = o.join(legs, keys="IRF_ID", join_type="left outer")
+    check("IRF_ID exists in the fact table", pc.is_null(j["F_ANSWERED_FLAG"]))
+    check("leg is an answered agent leg", pc.or_(pc.not_equal(j["F_ANSWERED_FLAG"], 1), pc.is_null(j["F_AGENT_ID"])))
+    check("leg has a customer party", pc.not_equal(j["F_N_CUSTOMER"], 1))
+    check("no outcomes on consult / internal legs", pc.is_in(j["F_CALL_TYPE"], pa.array(["Consult", "Internal"])))
+    check("AGENT_ID matches the leg", pc.not_equal(j["AGENT_ID"], j["F_AGENT_ID"]))
+    primary = pc.equal(j["OUTCOME_SEQ"], 1)
+    check("primary BUSINESS_RESULT == leg DISPOSITION",
+          pc.and_(primary, pc.not_equal(j["BUSINESS_RESULT"], j["F_DISPOSITION"])))
+    check("OUTCOME_TIME >= ANSWER_TIME", pc.less(j["OUTCOME_TIME"], j["F_ANSWER_TIME"]))
+    check("OUTCOME_TIME <= RECORDED_TIME", pc.greater(j["OUTCOME_TIME"], j["RECORDED_TIME"]))
+    wrap_end = pc.coalesce(j["F_ACW_END_TIME"], j["F_END_TIME"])
+    check("RECORDED_TIME <= end of wrap-up", pc.greater(j["RECORDED_TIME"], wrap_end))
+    check("IN_CALL_FLAG=1 => OUTCOME_TIME <= END_TIME",
+          pc.and_(pc.equal(j["IN_CALL_FLAG"], 1), pc.greater(j["OUTCOME_TIME"], j["F_END_TIME"])))
+
+    # ---- one primary outcome per leg, secondary only as CrossSell ---- #
+    prim = o.filter(pc.equal(o["OUTCOME_SEQ"], 1))
+    if len(pc.unique(prim["IRF_ID"])) != prim.num_rows:
+        failures.append("outcomes: more than one primary outcome for a leg")
+    sec = o.filter(pc.greater(o["OUTCOME_SEQ"], 1))
+    check("secondary outcomes are CrossSell", pc.and_(pc.greater(o["OUTCOME_SEQ"], 1), pc.not_equal(o["BUSINESS_RESULT"], "CrossSell")))
+    if sec.num_rows and not set(sec["IRF_ID"].to_pylist()) <= set(prim["IRF_ID"].to_pylist()):
+        failures.append("outcomes: secondary outcome without a primary")
+
+    # ---- field semantics ---- #
+    check("AMOUNT present iff AMOUNT_TYPE present", pc.xor(pc.is_valid(o["AMOUNT"]), pc.is_valid(o["AMOUNT_TYPE"])))
+    check("CURRENCY present iff AMOUNT present", pc.xor(pc.is_valid(o["CURRENCY"]), pc.is_valid(o["AMOUNT"])))
+    check("AMOUNT > 0", pc.less_equal(o["AMOUNT"], 0.0))
+    check("CASE_ID present iff FOLLOW_UP_FLAG", pc.xor(pc.is_valid(o["CASE_ID"]), pc.equal(o["FOLLOW_UP_FLAG"], 1)))
+    check("FOLLOW_UP_DUE_TIME present iff FOLLOW_UP_FLAG",
+          pc.xor(pc.is_valid(o["FOLLOW_UP_DUE_TIME"]), pc.equal(o["FOLLOW_UP_FLAG"], 1)))
+    check("FOLLOW_UP_DUE_TIME after RECORDED_TIME", pc.less_equal(o["FOLLOW_UP_DUE_TIME"], o["RECORDED_TIME"]))
+    check("OUTCOME_POLARITY valid", pc.invert(pc.is_in(o["OUTCOME_POLARITY"], pa.array(["Positive", "Neutral", "Negative"]))))
+    for col in ("OUTCOME_CATEGORY", "BUSINESS_RESULT", "LOB", "AGENT_ID", "CUSTOMER_ID", "OUTCOME_TIME", "RECORDED_TIME"):
+        check(f"{col} present", pc.is_null(o[col]))
+    return failures

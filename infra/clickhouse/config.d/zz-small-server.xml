@@ -1,0 +1,33 @@
+<clickhouse>
+    <!-- Tailscale Serve forwards into this shared loopback network namespace. -->
+    <listen_host replace="replace">127.0.0.1</listen_host>
+    <timezone>UTC</timezone>
+    <max_server_memory_usage>2147483648</max_server_memory_usage>
+    <max_concurrent_queries>4</max_concurrent_queries>
+    <mark_cache_size>134217728</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <!-- Keep upstream merge-pool defaults: lowering them alone can fail startup
+         because MergeTree free-pool thresholds depend on their size. -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
+    </logger>
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+    <!-- Avoid frequent diagnostic tables consuming a small server's disk/RAM. -->
+    <query_thread_log remove="remove"/>
+    <query_views_log remove="remove"/>
+    <part_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <text_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <asynchronous_metric_log remove="remove"/>
+    <processors_profile_log remove="remove"/>
+    <asynchronous_insert_log remove="remove"/>
+    <session_log remove="remove"/>
+    <backup_log remove="remove"/>
+</clickhouse>

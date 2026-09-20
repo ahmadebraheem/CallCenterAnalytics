@@ -1,0 +1,45 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <max_threads>2</max_threads>
+            <max_insert_threads>1</max_insert_threads>
+            <max_memory_usage>536870912</max_memory_usage>
+            <max_bytes_before_external_group_by>134217728</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>134217728</max_bytes_before_external_sort>
+            <max_execution_time>120</max_execution_time>
+            <max_concurrent_queries_for_user>2</max_concurrent_queries_for_user>
+            <max_insert_block_size>65536</max_insert_block_size>
+            <max_insert_block_size_bytes>16777216</max_insert_block_size_bytes>
+            <input_format_parallel_parsing>0</input_format_parallel_parsing>
+            <!-- Parquet loads are already batched. Opt in for small writes. -->
+            <async_insert>0</async_insert>
+            <wait_for_async_insert>1</wait_for_async_insert>
+            <log_queries>1</log_queries>
+        </default>
+        <ingestion>
+            <profile>default</profile>
+            <max_execution_time>600</max_execution_time>
+            <max_concurrent_queries_for_user>1</max_concurrent_queries_for_user>
+        </ingestion>
+        <analytics>
+            <profile>default</profile>
+            <readonly>1</readonly>
+        </analytics>
+    </profiles>
+    <users>
+        <ingest>
+            <password from_env="CLICKHOUSE_INGEST_PASSWORD" hide_in_preprocessed="true"/>
+            <networks><ip>127.0.0.1</ip></networks>
+            <profile>ingestion</profile>
+            <quota>default</quota>
+            <grants><query>GRANT INSERT ON callcenter_analytics.*</query></grants>
+        </ingest>
+        <reader>
+            <password from_env="CLICKHOUSE_READER_PASSWORD" hide_in_preprocessed="true"/>
+            <networks><ip>127.0.0.1</ip></networks>
+            <profile>analytics</profile>
+            <quota>default</quota>
+            <grants><query>GRANT SELECT ON callcenter_analytics.*</query></grants>
+        </reader>
+    </users>
+</clickhouse>

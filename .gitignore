@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local ClickHouse offline backups
+/infra/clickhouse/backups/

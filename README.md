@@ -35,6 +35,10 @@ without touching production data.
 
 Documentation:
 
+Optional infrastructure: [ClickHouse over Tailscale](docs/CLICKHOUSE.md) provides a separate
+Docker Compose database stack with a 3 GiB RAM / 2 CPU ClickHouse budget. The generator
+continues to write Parquet; database table creation and ingestion are separate steps.
+
 | Document | Contents |
 |---|---|
 | this README | concepts, quick start, configuration, model description, output layout |

@@ -32,14 +32,17 @@
             <networks><ip>127.0.0.1</ip></networks>
             <profile>ingestion</profile>
             <quota>default</quota>
-            <grants><query>GRANT INSERT ON callcenter_analytics.*</query></grants>
+            <grants><query>GRANT SELECT, INSERT ON callcenter_analytics.*</query></grants>
         </ingest>
         <reader>
             <password from_env="CLICKHOUSE_READER_PASSWORD" hide_in_preprocessed="true"/>
             <networks><ip>127.0.0.1</ip></networks>
             <profile>analytics</profile>
             <quota>default</quota>
-            <grants><query>GRANT SELECT ON callcenter_analytics.*</query></grants>
+            <grants>
+                <query>GRANT SELECT ON callcenter_analytics.*</query>
+                <query>GRANT SELECT ON callcenter_dbt_prod.*</query>
+            </grants>
         </reader>
     </users>
 </clickhouse>

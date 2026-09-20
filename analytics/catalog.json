@@ -1,0 +1,834 @@
+[
+  {
+    "name": "interaction_resource_fact",
+    "description": "One row per resource leg (agent, queue, IVR, external party, dialer) of a voice interaction - the Genesys Info Mart INTERACTION_RESOURCE_FACT grain. Partitioned by call_date.",
+    "columns": [
+      {
+        "name": "IRF_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Surrogate key of the row, unique across the run."
+      },
+      {
+        "name": "INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Interaction the leg belongs to; shared by all customer-facing legs of a call, consult legs get their own."
+      },
+      {
+        "name": "ROOT_INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Interaction id of the customer call at the root of the tree; group by this to reassemble a full call including consults."
+      },
+      {
+        "name": "CALL_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "16-hex ConnID-style identifier of this leg, unique per row."
+      },
+      {
+        "name": "CALL_DATE",
+        "clickhouse_type": "Nullable(Date)",
+        "description": "Business date of the root interaction (partition key); late legs of a call crossing midnight keep the root's date."
+      },
+      {
+        "name": "SEGMENT_SEQ",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "1-based order of the leg inside the root interaction tree in creation order."
+      },
+      {
+        "name": "PREVIOUS_CALL_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "CALL_ID of the leg that led to this one (previous agent for transfers / RONA re-queues, initiating leg for consults and conferences, initiator for internal calls); null when SEGMENT_SEQ = 1."
+      },
+      {
+        "name": "PARENT_INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Consult legs only: the customer interaction from which the consult was made."
+      },
+      {
+        "name": "PARENT_CALL_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Consult legs only: the CALL_ID of the agent leg that initiated the consult."
+      },
+      {
+        "name": "RELATED_INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Callback legs only (CALLBACK_FLAG = 1): the inbound interaction in which the callback was requested."
+      },
+      {
+        "name": "MEDIA_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Always voice."
+      },
+      {
+        "name": "CALL_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Inbound | Outbound | Internal | Consult."
+      },
+      {
+        "name": "RESOURCE_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Resource the row describes: Agent | Queue (abandoned / callback requested, no agent) | IVR | External | Dialer."
+      },
+      {
+        "name": "RESOURCE_ROLE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Received | ReceivedTransfer | ReceivedConsult | ConferenceJoined | Initiated."
+      },
+      {
+        "name": "SCENARIO",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Generator label of the scenario that produced the leg (see docs/SCENARIOS.md); not present in a real Info Mart."
+      },
+      {
+        "name": "CALL_RESULT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Business result of the leg: Answered, Abandoned, ShortAbandon, Transferred, Conferenced, RONA, SelfService, AfterHours, Voicemail, CallbackRequested, SystemError, NoAnswer, Busy, AnsweringMachine, Consulted, DialerDrop, Completed."
+      },
+      {
+        "name": "CALL_RESULT_CODE",
+        "clickhouse_type": "Nullable(Int16)",
+        "description": "Numeric code of CALL_RESULT (1 Answered ... 17 Completed)."
+      },
+      {
+        "name": "TECHNICAL_RESULT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Info Mart technical descriptor: Completed | Abandoned | Transferred | Conferenced | Redirected | Diverted | Failed."
+      },
+      {
+        "name": "TECHNICAL_RESULT_REASON",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Reason detail, e.g. AnsweredByAgent, AbandonedWhileQueued, RouteOnNoAnswer, BlindTransfer, IVRContained, NoAgentAvailable."
+      },
+      {
+        "name": "DISCONNECT_REASON",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Who released the leg: Customer | Agent | System | Transfer; null on RONA legs."
+      },
+      {
+        "name": "DISPOSITION",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent wrap-up code = primary BUSINESS_RESULT in interaction_outcome_fact; Transferred / Assisted / LeftMessage on legs without an outcome; null when no agent handled a customer."
+      },
+      {
+        "name": "CAMPAIGN_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Dialer campaign for outbound dialer legs."
+      },
+      {
+        "name": "ARRIVE_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Local start of the leg: arrival for root legs, moment of transfer / consult start / conference join / dial time otherwise."
+      },
+      {
+        "name": "ARRIVE_TIME_UTC",
+        "clickhouse_type": "Nullable(DateTime64(3, 'UTC'))",
+        "description": "ARRIVE_TIME as a UTC instant."
+      },
+      {
+        "name": "ANSWER_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "When the resource connected (ARRIVE_TIME + IVR + QUEUE + RING); null when not answered."
+      },
+      {
+        "name": "END_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "When the leg was released (ANSWER_TIME + TALK + HOLD, or arrival + IVR + queue + ring for unanswered legs)."
+      },
+      {
+        "name": "ACW_END_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "END_TIME + ACW_TIME; null when ACW_TIME = 0."
+      },
+      {
+        "name": "IVR_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Seconds in IVR / announcement / voicemail before queuing."
+      },
+      {
+        "name": "QUEUE_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Seconds waiting in the VQ (time waited before hanging up for abandons; dialer hand-off delay for dialer legs)."
+      },
+      {
+        "name": "RING_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Seconds the target resource was alerting (25 on RONA legs)."
+      },
+      {
+        "name": "TALK_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Seconds connected excluding hold (conference initiators include the conference portion)."
+      },
+      {
+        "name": "HOLD_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Seconds the customer was on hold, including consult time for legs that consulted."
+      },
+      {
+        "name": "HOLD_COUNT",
+        "clickhouse_type": "Nullable(Int16)",
+        "description": "Number of holds."
+      },
+      {
+        "name": "ACW_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "After-call work seconds."
+      },
+      {
+        "name": "DURATION",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "END_TIME - ARRIVE_TIME in seconds (excludes ACW)."
+      },
+      {
+        "name": "HANDLE_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "TALK_TIME + HOLD_TIME + ACW_TIME."
+      },
+      {
+        "name": "INTERVAL_15MIN",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ARRIVE_TIME floored to the 15-minute interval (local)."
+      },
+      {
+        "name": "ARRIVE_HOUR",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Local hour of ARRIVE_TIME (0-23)."
+      },
+      {
+        "name": "ROUTE_POINT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Route point DN the call entered on (the original VQ's for overflowed calls); null for direct DID / manual outbound / internal."
+      },
+      {
+        "name": "DNIS",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Number dialled: VQ DNIS for inbound, agent DID for direct / consult / internal, customer number for outbound."
+      },
+      {
+        "name": "ANI",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Calling number: customer ANI for inbound, site CLI (or VQ DNIS for callbacks) for outbound, initiating agent id for consults, agent DID for internal."
+      },
+      {
+        "name": "QUEUE_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ACD queue DN behind the VQ."
+      },
+      {
+        "name": "QUEUE_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ACD queue name."
+      },
+      {
+        "name": "VQ_ID",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Virtual queue id."
+      },
+      {
+        "name": "VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Virtual queue the leg was distributed from / worked in (the queue that finally handled an overflowed call); null for direct DID, manual outbound, internal, external legs."
+      },
+      {
+        "name": "ORIGINAL_VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Set when the call overflowed: the VQ the customer originally queued in."
+      },
+      {
+        "name": "SKILL",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Skill expression of the VQ."
+      },
+      {
+        "name": "ROUTING_METHOD",
+        "clickhouse_type": "Nullable(String)",
+        "description": "How the resource was selected: ACD | PBR | Direct | Consult | Conference | Manual | Dialer | Internal | Callback; queue legs carry the VQ's ACD/PBR; null on IVR / external legs."
+      },
+      {
+        "name": "PBR_SCORE",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "PBR-routed agent legs only: the selected agent's PBR percentile score (0-1)."
+      },
+      {
+        "name": "AGENT_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent employee id; null on Queue / IVR / External / Dialer legs."
+      },
+      {
+        "name": "AGENT_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent display name."
+      },
+      {
+        "name": "AGENT_GROUP",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Team, {LOB}_{SITE}_TEAMnn."
+      },
+      {
+        "name": "AGENT_TENURE_BAND",
+        "clickhouse_type": "Nullable(String)",
+        "description": "<3m | 3-12m | 1-3y | 3y+."
+      },
+      {
+        "name": "SITE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent's site, or the VQ's home site when no agent handled the leg; null for IVR self-service and external legs."
+      },
+      {
+        "name": "LOB",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Line of business of the VQ (or of the agent for direct / outbound / internal)."
+      },
+      {
+        "name": "CUSTOMER_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Customer key; null on consult and internal legs."
+      },
+      {
+        "name": "CUSTOMER_SEGMENT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Consumer | SMB | Enterprise | VIP."
+      },
+      {
+        "name": "ANSWERED_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Resource connected (has ANSWER_TIME)."
+      },
+      {
+        "name": "ABANDON_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Customer hung up before an agent connected (in queue or while ringing) or the dialer dropped the customer."
+      },
+      {
+        "name": "SHORT_ABANDON_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Abandoned with QUEUE_TIME below short_abandon_threshold_s; excluded from service level."
+      },
+      {
+        "name": "RONA_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Agent was alerted and did not answer (Redirect On No Answer)."
+      },
+      {
+        "name": "OVERFLOW_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Call was rerouted from ORIGINAL_VQ_NAME to VQ_NAME after waiting overflow_wait_s."
+      },
+      {
+        "name": "TRANSFER_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "This leg ended by transferring the customer onwards."
+      },
+      {
+        "name": "TRANSFER_IN_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "This leg received the customer via a transfer."
+      },
+      {
+        "name": "TRANSFER_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Blind | Warm | External, on both the transferring and the receiving leg."
+      },
+      {
+        "name": "TRANSFER_TO",
+        "clickhouse_type": "Nullable(String)",
+        "description": "On the transferring leg: target VQ name, target agent id or external number."
+      },
+      {
+        "name": "TRANSFER_COUNT",
+        "clickhouse_type": "Nullable(Int16)",
+        "description": "Transfers that occurred in the interaction before this leg began."
+      },
+      {
+        "name": "CONFERENCE_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Leg took part in a conference (initiator and joined agent)."
+      },
+      {
+        "name": "CONSULT_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Agent on this leg initiated a consult (warm transfer, consult-only, conference set-up)."
+      },
+      {
+        "name": "CONSULT_RECEIVED_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "This is the consult leg itself (CALL_TYPE = Consult)."
+      },
+      {
+        "name": "CALLBACK_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Outbound leg fulfilling a requested callback."
+      },
+      {
+        "name": "CALLBACK_REQUESTED_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Inbound queue leg on which the customer accepted a callback offer."
+      },
+      {
+        "name": "SERVICE_LEVEL_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "1 when QUEUE_TIME + RING_TIME <= the VQ's service_level_s, 0 otherwise; null when not applicable (short abandons, callbacks, direct / warm-received / consult / outbound legs)."
+      },
+      {
+        "name": "FIRST_CALL_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "First contact of this customer in the generated period."
+      },
+      {
+        "name": "REPEAT_CALL_7D_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Customer had another contact in the previous 7 days."
+      },
+      {
+        "name": "N_AGENT",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Agent parties on the leg: 0, 1 or 2 (consult, conference, internal)."
+      },
+      {
+        "name": "N_CUSTOMER",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Customer parties on the leg: 1 for customer-facing legs and connected outbound, else 0."
+      }
+    ]
+  },
+  {
+    "name": "interaction_outcome_fact",
+    "description": "Business outcomes recorded on handled customer legs (sale, saved, cancelled, resolved, payment, no change ...): one primary outcome per leg plus optional CrossSell secondary. Join to interaction_resource_fact on IRF_ID. Partitioned by call_date.",
+    "columns": [
+      {
+        "name": "OUTCOME_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "Surrogate key, unique across the run."
+      },
+      {
+        "name": "IRF_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "The agent leg the outcome was recorded on (interaction_resource_fact.IRF_ID)."
+      },
+      {
+        "name": "CALL_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "CALL_ID of that leg."
+      },
+      {
+        "name": "INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "INTERACTION_ID of that leg."
+      },
+      {
+        "name": "ROOT_INTERACTION_ID",
+        "clickhouse_type": "Nullable(Int64)",
+        "description": "ROOT_INTERACTION_ID of that leg (whole-call grouping key)."
+      },
+      {
+        "name": "CALL_DATE",
+        "clickhouse_type": "Nullable(Date)",
+        "description": "CALL_DATE of that leg (partition key)."
+      },
+      {
+        "name": "OUTCOME_SEQ",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "1 = primary outcome (equals the leg's DISPOSITION), 2 = secondary CrossSell."
+      },
+      {
+        "name": "OUTCOME_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "When the outcome happened: inside the conversation for monetary outcomes (and in_call_event_prob of the others), otherwise at wrap-up; always >= the leg's ANSWER_TIME."
+      },
+      {
+        "name": "OUTCOME_TIME_UTC",
+        "clickhouse_type": "Nullable(DateTime64(3, 'UTC'))",
+        "description": "OUTCOME_TIME as a UTC instant."
+      },
+      {
+        "name": "RECORDED_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "When the agent coded the outcome: inside the ACW window (END_TIME..ACW_END_TIME) or at END_TIME when there is no ACW; always >= OUTCOME_TIME."
+      },
+      {
+        "name": "IN_CALL_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "1 when OUTCOME_TIME lies inside the talk (<= END_TIME)."
+      },
+      {
+        "name": "CALL_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "CALL_TYPE of the leg."
+      },
+      {
+        "name": "SCENARIO",
+        "clickhouse_type": "Nullable(String)",
+        "description": "SCENARIO of the leg."
+      },
+      {
+        "name": "LOB",
+        "clickhouse_type": "Nullable(String)",
+        "description": "LOB whose outcome catalogue was used (VQ's LOB, or the agent's LOB for direct / manual outbound)."
+      },
+      {
+        "name": "VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "VQ_NAME of the leg."
+      },
+      {
+        "name": "CAMPAIGN_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Dialer campaign of the leg, if any."
+      },
+      {
+        "name": "ROUTING_METHOD",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ROUTING_METHOD of the leg (ACD, PBR, Direct, Manual, Dialer, Callback)."
+      },
+      {
+        "name": "AGENT_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent who recorded the outcome (= the leg's agent)."
+      },
+      {
+        "name": "AGENT_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent display name."
+      },
+      {
+        "name": "AGENT_GROUP",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent team."
+      },
+      {
+        "name": "AGENT_TENURE_BAND",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent tenure band."
+      },
+      {
+        "name": "AGENT_PBR_SCORE",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "The agent's PBR percentile score (0-1) on every row regardless of routing method; the agent effect on outcomes is driven by the same latent quality."
+      },
+      {
+        "name": "SITE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent site."
+      },
+      {
+        "name": "CUSTOMER_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Customer key."
+      },
+      {
+        "name": "CUSTOMER_SEGMENT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Consumer | SMB | Enterprise | VIP."
+      },
+      {
+        "name": "QUEUE_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "QUEUE_TIME of the leg (seconds), for wait-effect analysis without a join."
+      },
+      {
+        "name": "TALK_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "TALK_TIME of the leg (seconds)."
+      },
+      {
+        "name": "HANDLE_TIME",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "HANDLE_TIME of the leg (seconds)."
+      },
+      {
+        "name": "OUTCOME_CATEGORY",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Roll-up: Sale | Retention | Churn | Service | Escalation | Billing | Collections | FollowUp | NoChange."
+      },
+      {
+        "name": "BUSINESS_RESULT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "The outcome code from the LOB catalogue (Sale, NoSale, Saved, Cancelled, Downgraded, OfferDeclined, NoChange, Resolved, Escalated, FollowUp, PaymentTaken, PromiseToPay ...) or CrossSell on secondary rows."
+      },
+      {
+        "name": "OUTCOME_SUBTYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Detail: product sold, save offer, cancel reason, resolution type, payment method, escalation target, cross-sell product; null when the outcome has no subtypes."
+      },
+      {
+        "name": "OUTCOME_POLARITY",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Positive | Neutral | Negative."
+      },
+      {
+        "name": "OFFER_MADE_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "An offer was presented to the customer."
+      },
+      {
+        "name": "AMOUNT_TYPE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Revenue | MRR_Retained | MRR_Lost | Payment | Credit | Promise; null when the outcome carries no money."
+      },
+      {
+        "name": "AMOUNT",
+        "clickhouse_type": "Nullable(Float64)",
+        "description": "Positive amount in CURRENCY (direction given by AMOUNT_TYPE); present iff AMOUNT_TYPE."
+      },
+      {
+        "name": "CURRENCY",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ISO currency code of AMOUNT (outcomes.currency)."
+      },
+      {
+        "name": "FOLLOW_UP_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "A case / task was created (scheduled callback, pending decision, escalation, dispute, dispatch, promise to pay, hardship referral)."
+      },
+      {
+        "name": "CASE_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Case / ticket id, present iff FOLLOW_UP_FLAG."
+      },
+      {
+        "name": "FOLLOW_UP_DUE_TIME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "When the follow-up is due (1-5 days after RECORDED_TIME at a business hour; 3-14 days for promises to pay)."
+      }
+    ]
+  },
+  {
+    "name": "dim_site",
+    "description": "Contact-centre sites (locations) agents work from.",
+    "columns": [
+      {
+        "name": "SITE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Site name (primary key; joins interaction_resource_fact.SITE, dim_agent.SITE, dim_vq.HOME_SITE)."
+      },
+      {
+        "name": "COUNTRY",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ISO country code of the site."
+      },
+      {
+        "name": "OFFSHORE_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "1 for offshore sites, which staff most night shifts."
+      },
+      {
+        "name": "OUTBOUND_CLI",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Caller id presented on outbound calls from this site (ANI of outbound legs)."
+      }
+    ]
+  },
+  {
+    "name": "dim_lob",
+    "description": "Lines of business.",
+    "columns": [
+      {
+        "name": "LOB",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Line of business name (primary key; joins LOB on both facts, dim_vq.LOB, dim_agent.LOB)."
+      },
+      {
+        "name": "LOB_SHORT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Short code used in AGENT_GROUP names (SAL, RET, CS, TEC, BIL, COL)."
+      }
+    ]
+  },
+  {
+    "name": "dim_vq",
+    "description": "Virtual queues with their ACD queue, route point, DNIS, opening hours, routing method and expected AHT.",
+    "columns": [
+      {
+        "name": "VQ_ID",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Virtual queue id (primary key; joins interaction_resource_fact.VQ_ID)."
+      },
+      {
+        "name": "VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Virtual queue name (joins VQ_NAME / ORIGINAL_VQ_NAME / TRANSFER_TO on the fact)."
+      },
+      {
+        "name": "QUEUE_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ACD queue DN behind the VQ."
+      },
+      {
+        "name": "QUEUE_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ACD queue name."
+      },
+      {
+        "name": "ROUTE_POINT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Route point DN calls to this VQ enter on."
+      },
+      {
+        "name": "DNIS",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Toll-free number dialled to reach this VQ."
+      },
+      {
+        "name": "LOB",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Line of business of the VQ."
+      },
+      {
+        "name": "SKILL",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Skill expression required to take calls from the VQ."
+      },
+      {
+        "name": "HOME_SITE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Site reported on queue legs that never reached an agent."
+      },
+      {
+        "name": "OPEN_HOUR",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Local opening hour (0-23)."
+      },
+      {
+        "name": "CLOSE_HOUR",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Local closing hour (1-24; 24 = midnight; OPEN 0 / CLOSE 24 = 24x7)."
+      },
+      {
+        "name": "OPEN_DAYS",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Mon-Sun | Mon-Sat | Mon-Fri."
+      },
+      {
+        "name": "SERVICE_LEVEL_S",
+        "clickhouse_type": "Nullable(Int16)",
+        "description": "Service-level threshold in seconds used for SERVICE_LEVEL_FLAG."
+      },
+      {
+        "name": "OVERFLOW_VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Backup VQ calls overflow to after overflow_wait_s; null when none."
+      },
+      {
+        "name": "ROUTING_METHOD",
+        "clickhouse_type": "Nullable(String)",
+        "description": "ACD (longest idle, uniform) or PBR (Predictive Behavioural Routing, skewed to high-scoring agents)."
+      },
+      {
+        "name": "PBR_ENABLED_FLAG",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "1 when the VQ uses PBR."
+      },
+      {
+        "name": "PBR_SKEW",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "Strength of the PBR skew: agent selection weight = exp(PBR_SKEW * agent quality z-score), i.e. the log-normal sigma of agent weights (0 = uniform, 1.2 = extreme); null for ACD queues."
+      },
+      {
+        "name": "ROSTER_SIZE",
+        "clickhouse_type": "Nullable(Int32)",
+        "description": "Number of agents skilled for the VQ (primary or secondary skill)."
+      },
+      {
+        "name": "EXPECTED_AHT_S",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "Expected average handle time in seconds used for staffing (talk + expected hold + ACW)."
+      }
+    ]
+  },
+  {
+    "name": "dim_agent",
+    "description": "Agent roster: team, site, LOB, skills, shift, days off, personal speed factor and PBR score.",
+    "columns": [
+      {
+        "name": "AGENT_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent employee id (primary key; joins AGENT_ID on both facts and TRANSFER_TO)."
+      },
+      {
+        "name": "AGENT_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Display name."
+      },
+      {
+        "name": "AGENT_GROUP",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Team, {LOB}_{SITE}_TEAMnn."
+      },
+      {
+        "name": "SITE",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Site the agent works from."
+      },
+      {
+        "name": "LOB",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Line of business of the agent's primary skill."
+      },
+      {
+        "name": "AGENT_TENURE_BAND",
+        "clickhouse_type": "Nullable(String)",
+        "description": "<3m | 3-12m | 1-3y | 3y+; newer agents are slower and have lower PBR quality on average."
+      },
+      {
+        "name": "PRIMARY_VQ_NAME",
+        "clickhouse_type": "Nullable(String)",
+        "description": "VQ of the agent's primary skill."
+      },
+      {
+        "name": "SKILLS",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Pipe-separated skill expressions the agent carries (primary plus optional secondary in the same LOB)."
+      },
+      {
+        "name": "SHIFT_START_HOUR",
+        "clickhouse_type": "Nullable(Int8)",
+        "description": "Local hour the agent's shift starts (0-23)."
+      },
+      {
+        "name": "SHIFT_LEN_H",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "Shift length in hours."
+      },
+      {
+        "name": "DAYS_OFF",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Pipe-separated weekday names the agent does not work."
+      },
+      {
+        "name": "SPEED_FACTOR",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "Multiplier on the agent's talk and ACW times (1.0 = average)."
+      },
+      {
+        "name": "PBR_SCORE",
+        "clickhouse_type": "Nullable(Float32)",
+        "description": "Percentile rank (0-1) of the agent's latent quality; drives PBR routing and the agent effect on business outcomes."
+      },
+      {
+        "name": "AGENT_DID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Agent's direct-dial number (DNIS of direct / consult / internal legs)."
+      }
+    ]
+  },
+  {
+    "name": "dim_customer",
+    "description": "Customer pool: id, phone number (ANI) and segment.",
+    "columns": [
+      {
+        "name": "CUSTOMER_ID",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Customer key (primary key; joins CUSTOMER_ID on both facts)."
+      },
+      {
+        "name": "ANI",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Customer phone number (ANI of inbound legs, DNIS of outbound legs)."
+      },
+      {
+        "name": "CUSTOMER_SEGMENT",
+        "clickhouse_type": "Nullable(String)",
+        "description": "Consumer | SMB | Enterprise | VIP."
+      }
+    ]
+  }
+]

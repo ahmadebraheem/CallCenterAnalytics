@@ -2,7 +2,9 @@
 
 This optional stack lives in `infra/clickhouse`. It runs independently of the synthetic
 data generator and creates `callcenter_analytics`. It does not create the seven data
-tables or import Parquet automatically. There is one server, without replication or Keeper.
+tables or import Parquet automatically. The optional [dbt and loading overlay](DBT.md)
+now provides explicit bootstrap and load commands for all seven tables. There is one
+server, without replication or Keeper.
 
 ## Resources and settings
 
@@ -49,8 +51,11 @@ Since Serve is a proxy, ClickHouse sees loopback as the client address; enforce
 device-level access at Tailscale and use distinct database accounts for auditability.
 
 - `admin`: schema management and administration; created by the official image.
-- `ingest`: INSERT only on `callcenter_analytics.*`.
-- `reader`: SELECT on `callcenter_analytics.*`, with the read-only profile.
+- `ingest`: SELECT and INSERT on `callcenter_analytics.*`; SELECT supports loader
+  replay checks and row-count reconciliation.
+- `reader`: SELECT on `callcenter_analytics.*` and `callcenter_dbt_prod.*`, with the read-only profile.
+- `dbt`: SQL-managed by the optional analytics bootstrap; reads raw sources and manages
+  objects in `callcenter_dbt_dev` and `callcenter_dbt_prod`.
 
 The stock unauthenticated `default` user is removed by the image's named-user setup.
 The ingestion and reader accounts are XML-managed; edit their configuration rather
@@ -138,7 +143,7 @@ CREATE TABLE callcenter_analytics.connection_check (id UInt64)
 ENGINE = MergeTree ORDER BY id;
 ```
 
-Connect as `ingest`, insert one row, and confirm SELECT on this table is denied.
+Connect as `ingest`, insert one row, confirm SELECT works and CREATE TABLE is denied.
 Connect as `reader`, confirm the row is visible and INSERT is denied. Restart
 ClickHouse, verify the row remains, then drop this disposable table as admin.
 Also confirm that a client outside the tailnet cannot reach the database.

@@ -1,0 +1,21 @@
+callcenter:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: clickhouse
+      host: "{{ env_var('CLICKHOUSE_HOST', 'callcenter-clickhouse') }}"
+      port: 8123
+      user: dbt
+      password: "{{ env_var('DBT_ENV_SECRET_CLICKHOUSE_PASSWORD') }}"
+      schema: callcenter_dbt_dev
+      secure: false
+      threads: 1
+    prod:
+      type: clickhouse
+      host: "{{ env_var('CLICKHOUSE_HOST', 'callcenter-clickhouse') }}"
+      port: 8123
+      user: dbt
+      password: "{{ env_var('DBT_ENV_SECRET_CLICKHOUSE_PASSWORD') }}"
+      schema: callcenter_dbt_prod
+      secure: false
+      threads: 1

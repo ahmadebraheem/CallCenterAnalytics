@@ -1,0 +1,60 @@
+# Overlay: docker compose -f compose.yaml -f compose.analytics.yaml ...
+services:
+  dbt:
+    profiles: [analytics]
+    build:
+      context: ../..
+      dockerfile: analytics/Dockerfile
+    image: callcenter-dbt:2.0.6
+    network_mode: service:tailscale
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: 127.0.0.1
+      DBT_ENV_SECRET_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_DBT_PASSWORD:?Set CLICKHOUSE_DBT_PASSWORD in .env}
+      DBT_TARGET: ${DBT_TARGET:-dev}
+    volumes:
+      - dbt-target:/workspace/analytics/dbt/target
+      - dbt-logs:/workspace/analytics/dbt/logs
+    mem_limit: 1g
+    cpus: 1.0
+
+  loader:
+    profiles: [analytics]
+    image: callcenter-dbt:2.0.6
+    network_mode: service:tailscale
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: [python, /workspace/analytics/scripts/load.py]
+    command: [--help]
+    environment:
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_USER: ingest
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:?Set CLICKHOUSE_INGEST_PASSWORD in .env}
+    volumes:
+      - ${DATA_DIR:-../../out}:/data:ro
+    mem_limit: 1g
+    cpus: 1.0
+
+  bootstrap:
+    profiles: [analytics]
+    image: callcenter-dbt:2.0.6
+    network_mode: service:tailscale
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: [python, /workspace/analytics/scripts/load.py]
+    command: [bootstrap]
+    environment:
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?Set CLICKHOUSE_ADMIN_PASSWORD in .env}
+      CLICKHOUSE_DBT_PASSWORD: ${CLICKHOUSE_DBT_PASSWORD:?Set CLICKHOUSE_DBT_PASSWORD in .env}
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  dbt-target:
+  dbt-logs:

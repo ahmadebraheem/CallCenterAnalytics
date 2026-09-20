@@ -1,0 +1,6 @@
+# Latest dbt distribution verified against PyPI on 2026-09-20.
+# v2 includes its ClickHouse adapter; do not also install dbt-clickhouse v1.
+dbt==2.0.6
+clickhouse-connect==1.8.0
+pyarrow==25.0.1
+PyYAML==6.0.3

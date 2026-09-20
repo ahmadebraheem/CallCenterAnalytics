@@ -1,0 +1,72 @@
+version: 2
+models:
+- name: stg_interaction_resource_fact
+  description: 'Completed loads: One row per resource leg (agent, queue, IVR, external
+    party, dialer) of a voice interaction - the Genesys Info Mart INTERACTION_RESOURCE_FACT
+    grain. Partitioned by call_date.'
+  columns:
+  - name: IRF_ID
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_interaction_outcome_fact
+  description: 'Completed loads: Business outcomes recorded on handled customer legs
+    (sale, saved, cancelled, resolved, payment, no change ...): one primary outcome
+    per leg plus optional CrossSell secondary. Join to interaction_resource_fact on
+    IRF_ID. Partitioned by call_date.'
+  columns:
+  - name: OUTCOME_ID
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_dim_site
+  description: 'Completed loads: Contact-centre sites (locations) agents work from.'
+  columns:
+  - name: SITE
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_dim_lob
+  description: 'Completed loads: Lines of business.'
+  columns:
+  - name: LOB
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_dim_vq
+  description: 'Completed loads: Virtual queues with their ACD queue, route point,
+    DNIS, opening hours, routing method and expected AHT.'
+  columns:
+  - name: VQ_ID
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_dim_agent
+  description: 'Completed loads: Agent roster: team, site, LOB, skills, shift, days
+    off, personal speed factor and PBR score.'
+  columns:
+  - name: AGENT_ID
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null
+- name: stg_dim_customer
+  description: 'Completed loads: Customer pool: id, phone number (ANI) and segment.'
+  columns:
+  - name: CUSTOMER_ID
+    data_tests:
+    - not_null
+  - name: _dataset_id
+    data_tests:
+    - not_null

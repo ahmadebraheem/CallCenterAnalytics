@@ -1,0 +1,10 @@
+.git
+.env
+**/.env
+.venv*
+**/__pycache__
+**/target
+**/logs
+**/dbt_packages
+out
+infra/clickhouse/backups

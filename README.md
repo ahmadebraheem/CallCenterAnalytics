@@ -43,6 +43,7 @@ raw-table bootstrap, all seven source definitions, and a complete-dataset Parque
 | Document | Contents |
 |---|---|
 | this README | concepts, quick start, configuration, model description, output layout |
+| [AGENTS.md](AGENTS.md) | orientation for AI agents and new contributors: repo map, verified commands, which files must stay in sync, conventions, and the decision history behind the design |
 | [docs/DATA_DICTIONARY.md](docs/DATA_DICTIONARY.md) | the 7 output tables, their relationships and every column (2 facts, 5 dimensions); also emitted as `_data_dictionary.csv` |
 | [docs/SCENARIOS.md](docs/SCENARIOS.md) | every scenario the generator produces and exactly how it is encoded, incl. the business-outcome model (§11) |
 

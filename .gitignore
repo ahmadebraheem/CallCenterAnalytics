@@ -217,6 +217,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Generated synthetic datasets (the generator's default output directory and any Parquet output)
+/out/
+*.parquet
+
 # Local ClickHouse offline backups
 /infra/clickhouse/backups/
 /.venv-dbt/

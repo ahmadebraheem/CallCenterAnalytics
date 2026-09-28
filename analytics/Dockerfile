@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && dbt --version
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY analytics /workspace/analytics
+COPY gim_synth /workspace/gim_synth
 WORKDIR /workspace/analytics/dbt
 ENTRYPOINT ["dbt"]
 CMD ["debug"]

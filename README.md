@@ -39,6 +39,8 @@ Optional infrastructure: [ClickHouse over Tailscale](docs/CLICKHOUSE.md) provide
 Docker Compose database stack with a 3 GiB RAM / 2 CPU ClickHouse budget. The generator
 continues to write Parquet. [dbt deployment and data loading](docs/DBT.md) adds dbt 2.0.6,
 raw-table bootstrap, all seven source definitions, and a complete-dataset Parquet loader.
+See [checked ingestion and recovery](docs/LOADING.md) for CLI commands, duplicate
+protection, validation reports, and interrupted-load recovery.
 
 | Document | Contents |
 |---|---|
@@ -91,6 +93,57 @@ stats = generate(cfg, log=print)
 ```
 
 ---
+
+## Load Parquet into ClickHouse
+
+The loader handles both facts and all five dimensions together. It validates schemas,
+keys, references, business rules and manifest counts before inserting, then reconciles
+the stored data before making the dataset visible through dbt staging views.
+
+### Docker CLI (existing ClickHouse deployment)
+
+Use the existing private `infra/clickhouse/.env`; set `DATA_DIR` there to the generated
+directory on the Docker host (default `../../out`). From the repository root:
+
+```text
+cd infra/clickhouse
+docker compose -f compose.yaml -f compose.analytics.yaml build dbt
+docker compose -f compose.yaml -f compose.analytics.yaml run --rm bootstrap init
+docker compose -f compose.yaml -f compose.analytics.yaml run --rm loader validate
+docker compose -f compose.yaml -f compose.analytics.yaml run --rm loader load --dataset-id august-2026 > load-report.json
+docker compose -f compose.yaml -f compose.analytics.yaml run --rm loader verify --dataset-id august-2026
+docker compose -f compose.yaml -f compose.analytics.yaml run --rm loader status
+```
+
+`init` creates missing raw tables using the admin account. Loading uses the restricted
+`ingest` account; apply the current server grants as described in
+[the loading guide](docs/LOADING.md). `load` includes validation, so the separate
+`validate` command is optional. Docker mounts the input directory read-only at `/data`.
+
+### Python CLI
+
+From the repository root, install `analytics/requirements.txt` in a virtual environment.
+Supply `CLICKHOUSE_HOST` (default `callcenter-clickhouse`), `CLICKHOUSE_USER` (default
+`ingest`), and `CLICKHOUSE_PASSWORD` through your environment. The HTTP port is 8123.
+
+```text
+python analytics/scripts/load.py --help
+python analytics/scripts/load.py validate --directory out --report validation.json
+python analytics/scripts/load.py load --directory out --dataset-id august-2026 --report load-report.json
+python analytics/scripts/load.py verify --directory out --dataset-id august-2026 --report verification.json
+python analytics/scripts/load.py status
+```
+
+Validation needs no database credentials. `load --dry-run` also validates without
+connecting. For first-time table creation, run `init` with admin credentials or use
+`load --create-tables` with that account. Reports belong outside the input directory.
+
+Reusing a completed dataset ID verifies it and skips inserts. Changed data under that
+ID, duplicate keys, and identical file contents under another ID are rejected. Separate
+datasets may reuse business keys, so include `_dataset_id` in joins. Byte fingerprints
+do not detect overlapping data that has been independently regenerated or re-encoded.
+An interrupted write retains its lock; follow [explicit recovery](docs/LOADING.md#recovering-an-interrupted-attempt)
+before unlocking or using the administrator-only `--retry` cleanup option.
 
 ## 2. Output layout
 

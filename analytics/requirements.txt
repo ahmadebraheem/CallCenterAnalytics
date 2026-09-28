@@ -4,3 +4,5 @@ dbt==2.0.6
 clickhouse-connect==1.8.0
 pyarrow==25.0.1
 PyYAML==6.0.3
+numpy==2.5.3
+tzdata==2026.4

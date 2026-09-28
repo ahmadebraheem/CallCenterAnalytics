@@ -88,21 +88,24 @@ docker compose -f compose.yaml -f compose.analytics.yaml run --rm dbt build --ta
 
 Choose a meaningful unique dataset ID. Include `_dataset_id` in joins because separate
 generator runs can reuse interaction, outcome, agent and dimension identifiers.
-Use only one loader at a time, including across hosts. The completion ledger does not
-provide a distributed lock or a database uniqueness constraint.
+The CLI acquires a server-side lock to serialize participating loaders across hosts.
+Manual SQL and older loaders can bypass it; raw tables have no uniqueness constraint.
 
-The loader checks all seven files/schemas, verifies fact counts against the manifest,
-hashes input contents, and inserts in batches of at most 8192 rows. It then reconciles
-each table's loaded count and verifies inputs did not change. Only after all checks
+The loader checks all seven sources, exact types, keys across files, references,
+business invariants, partition dates and manifest counts before inserting in batches
+of at most 8192 rows. It reconciles physical counts, keys, nulls, selected metric
+totals and source-file counts, and verifies inputs did not change. Only after all checks
 pass does it publish a row in `_dataset_loads`. Staging views expose only completed
 load IDs. An empty but valid dataset is allowed; it is not evidence of business volume.
 
-An identical rerun for a completed dataset ID performs no inserts. A changed dataset
-using an already completed ID fails with instructions to use a new ID. A failed load
-leaves unpublished rows; retrying creates a new attempt ID and keeps those old rows
-out of staging. Administrative cleanup of failed attempts is a later maintenance
-operation. Direct queries against raw sources can see unpublished rows; consume the
-staging views for complete data. Do not edit input files while loading.
+An identical rerun verifies the completed dataset and performs no inserts. Changed
+content under a completed ID, or identical content under another ID, is rejected.
+A failed write retains its lock and leaves unpublished rows. After confirming the
+old writer has stopped, explicit recovery unlocks it; an administrator uses `--retry`
+to delete unpublished rows synchronously before reloading. Direct raw queries can
+see unpublished rows; consume staging views for complete data. Do not edit input
+files while loading. See [checked ingestion and recovery](LOADING.md) for offline
+validation, JSON reports, exact recovery commands and fingerprint limitations.
 
 If existing raw tables were created manually, the loader refuses incompatible schemas
 instead of changing or deleting them. Plan an explicit migration before loading.
@@ -170,6 +173,16 @@ all 25 tests, and repeating the loader skipped all inserts. The isolated instanc
 was removed after verification. Seven loader contract tests and all 28 existing
 generator tests also passed. Configuration reload applied the new live grants
 without restarting the server.
+
+## Loader verification (2026-09-28)
+
+The checked loader loaded all 67 actual August Parquet files into an isolated
+ClickHouse 26.8.7.19 server: 1,324,756 resource rows, 705,933 outcomes and all five
+dimensions. It passed reconciliation under a 1 GiB / one CPU loader limit. Replaying
+the complete dataset verified stored data and skipped inserts. Separate integration
+checks exercised concurrent writer exclusion, duplicate data, corrupted physical
+rows, interrupted inserts, explicit retry cleanup and lost completion acknowledgements.
+These tests did not load the production database.
 
 ## Release references
 

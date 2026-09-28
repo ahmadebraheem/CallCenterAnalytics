@@ -32,7 +32,10 @@
             <networks><ip>127.0.0.1</ip></networks>
             <profile>ingestion</profile>
             <quota>default</quota>
-            <grants><query>GRANT SELECT, INSERT ON callcenter_analytics.*</query></grants>
+            <grants>
+                <query>GRANT SELECT, INSERT ON callcenter_analytics.*</query>
+                <query>GRANT CREATE TABLE, DROP TABLE ON callcenter_analytics._loader_lock</query>
+            </grants>
         </ingest>
         <reader>
             <password from_env="CLICKHOUSE_READER_PASSWORD" hide_in_preprocessed="true"/>

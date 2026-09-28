@@ -52,7 +52,8 @@ device-level access at Tailscale and use distinct database accounts for auditabi
 
 - `admin`: schema management and administration; created by the official image.
 - `ingest`: SELECT and INSERT on `callcenter_analytics.*`; SELECT supports loader
-  replay checks and row-count reconciliation.
+  replay checks and row-count reconciliation. CREATE TABLE and DROP TABLE are also
+  granted only on `callcenter_analytics._loader_lock` for cooperative writer locking.
 - `reader`: SELECT on `callcenter_analytics.*` and `callcenter_dbt_prod.*`, with the read-only profile.
 - `dbt`: SQL-managed by the optional analytics bootstrap; reads raw sources and manages
   objects in `callcenter_dbt_dev` and `callcenter_dbt_prod`.

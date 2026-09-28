@@ -20,8 +20,9 @@ The checked-in baseline uses:
   The ClickHouse memory tracker is not a hard process RSS cap; Docker enforces that cap.
 - 512 MiB per query, two query threads, one insert thread, at most four concurrent
   queries overall and two per user (one for ingestion).
-- GROUP BY and sort spill thresholds of 128 MiB. These help those operations use disk;
-  large joins and other operations can still hit the memory limit.
+- GROUP BY, sort and automatic hash-join spill thresholds of 128 MiB, plus an
+  8,192-row query block target. Spilling trades disk I/O for lower memory; it does
+  not guarantee every query will fit the 512 MiB limit.
 - 120-second query timeout, 600 seconds for ingestion, 64K-row / 16 MiB insert block
   targets and disabled parallel input parsing. Timeouts are checked during execution,
   and block targets are not hard limits on total import memory.
@@ -237,3 +238,35 @@ upgrade rehearsal, retention policy and optional database TLS.
 This addition was checked statically. Docker was unavailable in the authoring session,
 so image pulls, server startup, account enforcement, backup/restore and tailnet access
 remain to be verified on the deployment host using the checks above.
+
+## Wide fact joins and memory errors
+
+For this 3 GiB server, keep `max_memory_usage` at 512 MiB and spill hash joins
+at 128 MiB (`max_bytes_before_external_join`). `max_block_size=8192` also reduces
+read-block memory. These settings are in the default user profile and reload from
+the mounted XML; reconnect SQL clients to pick up fresh profile defaults.
+
+A `LIMIT 200` does not limit the rows used to build a join. Select only the columns
+needed, filter datasets/dates, and join outcomes at their actual resource-leg grain:
+
+```sql
+SELECT i.IRF_ID, i.INTERACTION_ID, i.CALL_DATE, i.AGENT_ID,
+       o.OUTCOME_ID, o.BUSINESS_RESULT, o.AMOUNT
+FROM callcenter_dbt_prod.stg_interaction_resource_fact AS i
+LEFT JOIN callcenter_dbt_prod.stg_interaction_outcome_fact AS o
+  ON i._dataset_id = o._dataset_id AND i.IRF_ID = o.IRF_ID
+WHERE i._dataset_id = 'august-2026'
+  AND i.CALL_DATE < '2026-08-16'
+LIMIT 200;
+```
+
+Joining only on `INTERACTION_ID` can attach an outcome to other resource legs in
+the same interaction; omitting `_dataset_id` can also match separate generator runs.
+Multiple outcomes per leg are legitimate and still produce multiple joined rows.
+The limit above is an unordered preview, not a deterministic pagination contract.
+
+On 2026-09-28, a wide fact join failed at the 512 MiB query limit. With the new live
+profile, the original query returned 200 rows at about 298 MiB tracked query memory.
+The container and server limits were unchanged. Memory requirements still depend on
+query shape and concurrent work; this setting is not a substitute for selecting
+appropriate columns and join keys.

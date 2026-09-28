@@ -4,6 +4,9 @@
             <max_threads>2</max_threads>
             <max_insert_threads>1</max_insert_threads>
             <max_memory_usage>536870912</max_memory_usage>
+            <!-- Spill wide fact joins before read buffers exhaust the query budget. -->
+            <max_bytes_before_external_join>134217728</max_bytes_before_external_join>
+            <max_block_size>8192</max_block_size>
             <max_bytes_before_external_group_by>134217728</max_bytes_before_external_group_by>
             <max_bytes_before_external_sort>134217728</max_bytes_before_external_sort>
             <max_execution_time>120</max_execution_time>
